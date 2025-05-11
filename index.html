@@ -2,24 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Link Graph Explorer</title>
+  <title>Wikipedia Link Graph with Clusters</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 1em; }
     input, button { padding: 0.5em; margin: 0.5em 0; }
     label { display: block; margin-top: 1em; }
     #status { margin: .5em 0; color: #555; }
     svg { width: 100%; height: 80vh; border: 1px solid #ccc; }
-    /* Tooltip styling */
     #tooltip {
-      position: absolute;
-      pointer-events: none;
+      position: absolute; pointer-events: none;
       background: rgba(255,255,255,0.9);
-      padding: 4px 8px;
-      border: 1px solid #999;
-      border-radius: 4px;
-      font-size: 12px;
-      display: none;
-      white-space: nowrap;
+      padding: 4px 8px; border: 1px solid #999;
+      border-radius: 4px; font-size: 12px; display: none;
     }
   </style>
 </head>
@@ -50,18 +44,17 @@
     const goBtn       = document.getElementById('goBtn');
     const tooltipEl   = d3.select('#tooltip');
     const svg         = d3.select('#graph');
-    const container   = svg.append('g');  // all graph elements go here
+    const container   = svg.append('g');
 
     depthSlider.addEventListener('input', () => {
       depthValue.textContent = depthSlider.value;
     });
 
-    // Zoom behavior
+    // Zoom & pan
     svg.call(d3.zoom()
       .scaleExtent([0.1, 4])
       .on('zoom', ({transform}) => container.attr('transform', transform)));
 
-    // Fetch & crawl as before…
     async function fetchLinks(title) {
       const enc = encodeURIComponent(title), all = [];
       let cont = '';
@@ -86,93 +79,145 @@
       statusEl.textContent = 'Crawling…';
       const nodesMap = new Map(), links = [];
       const visited = new Set(), queue = [{title: start, depth: 0}];
-      nodesMap.set(start, {id: start, group: 0});
+      nodesMap.set(start, {id: start, depth: 0});
 
       while (queue.length) {
         const {title, depth} = queue.shift();
         if (depth > maxDepth || visited.has(title)) continue;
         visited.add(title);
+
         statusEl.textContent = `Fetching "${title}" (depth ${depth})…`;
         const neigh = await fetchLinks(title);
         neigh.forEach(tgt => {
-          if (!nodesMap.has(tgt)) nodesMap.set(tgt, {id: tgt, group: depth + 1});
+          if (!nodesMap.has(tgt)) nodesMap.set(tgt, {id: tgt, depth: depth+1});
           links.push({source: title, target: tgt});
-          if (depth < maxDepth) queue.push({title: tgt, depth: depth + 1});
+          if (depth < maxDepth) queue.push({title: tgt, depth: depth+1});
         });
       }
-      statusEl.textContent = `Done: ${nodesMap.size} nodes, ${links.length} links.`;
+      statusEl.textContent = `Done crawl: ${nodesMap.size} nodes, ${links.length} links.`;
       return {nodes: Array.from(nodesMap.values()), links};
     }
 
+    // Label Propagation community detection
+    function detectCommunities(nodes, links, iterations=10) {
+      const labels = {}, adj = {};
+      nodes.forEach(n => { labels[n.id] = n.id; adj[n.id] = []; });
+      links.forEach(l => {
+        adj[l.source].push(l.target);
+        adj[l.target].push(l.source);
+      });
+      for (let it=0; it<iterations; it++) {
+        nodes.forEach(n => {
+          const counts = {};
+          adj[n.id].forEach(nb => {
+            const lab = labels[nb];
+            counts[lab] = (counts[lab]||0) + 1;
+          });
+          let best = labels[n.id], max = 0;
+          for (const lab in counts) {
+            if (counts[lab] > max || (counts[lab]===max && lab<best)) {
+              best = lab; max = counts[lab];
+            }
+          }
+          labels[n.id] = best;
+        });
+      }
+      // remap labels to 0…k-1
+      const mapping = {}, clusters = 0;
+      let idx=0;
+      for (const id in labels) {
+        const lab = labels[id];
+        if (!(lab in mapping)) mapping[lab] = idx++;
+        nodes.find(n=>n.id===id).cluster = mapping[lab];
+      }
+    }
+
     function draw({nodes, links}) {
+      statusEl.textContent = 'Detecting communities…';
+      detectCommunities(nodes, links, 15);
+
       statusEl.textContent = 'Rendering graph…';
       container.selectAll('*').remove();
-
       const width  = +svg.node().clientWidth;
       const height = +svg.node().clientHeight;
       const color  = d3.scaleOrdinal(d3.schemeCategory10);
 
       const sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id(d => d.id).distance(60).strength(0.1))
+        .force('link', d3.forceLink(links).id(d=>d.id).distance(60).strength(0.1))
         .force('charge', d3.forceManyBody().strength(-50))
         .force('center', d3.forceCenter(width/2, height/2))
-        .alphaDecay(0.05) // higher decay → faster stabilization
-        .velocityDecay(0.8);
+        .force('cluster', clusteringForce())
+        .alphaDecay(0.03);
 
-      const link = container.append('g')
+      // draw links
+      container.append('g')
         .attr('stroke','#aaa')
         .selectAll('line')
         .data(links)
         .join('line');
 
+      // draw nodes
       const node = container.append('g')
-        .attr('stroke','#fff')
-        .attr('stroke-width',1.5)
+        .attr('stroke','#fff').attr('stroke-width',1.5)
         .selectAll('circle')
         .data(nodes)
         .join('circle')
           .attr('r', 6)
-          .attr('fill', d => color(d.group))
+          .attr('fill', d=>color(d.cluster))
           .call(d3.drag()
-            .on('start', (e,d) => {
-              if (!e.active) sim.alphaTarget(0.3).restart();
-              d.fx=d.x; d.fy=d.y;
-            })
-            .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
-            .on('end',   (e,d) => {
-              if (!e.active) sim.alphaTarget(0);
-              d.fx=null; d.fy=null;
-            }))
-          .on('mouseover', (e,d) => {
-            tooltipEl
-              .style('display','block')
-              .text(d.id);
+            .on('start', (e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+            .on('drag',  (e,d)=>{ d.fx=e.x; d.fy=e.y; })
+            .on('end',   (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
+          .on('mouseover', (e,d)=> {
+            tooltipEl.style('display','block').text(d.id);
           })
-          .on('mousemove', (e) => {
-            tooltipEl
-              .style('top',  (e.pageY+10)+'px')
-              .style('left', (e.pageX+10)+'px');
+          .on('mousemove', (e)=> {
+            tooltipEl.style('top', (e.pageY+10)+'px').style('left', (e.pageX+10)+'px');
           })
-          .on('mouseout', () => {
+          .on('mouseout', ()=> {
             tooltipEl.style('display','none');
           });
 
-      sim.on('tick', () => {
-        link
-          .attr('x1', d=>d.source.x)
-          .attr('y1', d=>d.source.y)
-          .attr('x2', d=>d.target.x)
-          .attr('y2', d=>d.target.y);
-
+      sim.on('tick', ()=>{
+        container.selectAll('line')
+          .attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+          .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
         node
-          .attr('cx', d=>d.x)
-          .attr('cy', d=>d.y);
+          .attr('cx', d=>d.x).attr('cy', d=>d.y);
       });
-
       statusEl.textContent = 'Graph ready.';
     }
 
-    goBtn.addEventListener('click', async () => {
+    // custom force to pull nodes toward their cluster centroid
+    function clusteringForce() {
+      let nodes;
+      function force(alpha) {
+        const centroids = {};
+        const counts = {};
+        nodes.forEach(d => {
+          if (!(d.cluster in centroids)) {
+            centroids[d.cluster] = {x:0,y:0};
+            counts[d.cluster] = 0;
+          }
+          centroids[d.cluster].x += d.x;
+          centroids[d.cluster].y += d.y;
+          counts[d.cluster]++;
+        });
+        for (const c in centroids) {
+          centroids[c].x /= counts[c];
+          centroids[c].y /= counts[c];
+        }
+        nodes.forEach(d => {
+          const c = centroids[d.cluster];
+          d.vx += (c.x - d.x) * 0.02 * alpha;
+          d.vy += (c.y - d.y) * 0.02 * alpha;
+        });
+      }
+      force.initialize = _ => nodes = _;
+      return force;
+    }
+
+    goBtn.addEventListener('click', async ()=>{
       const start = document.getElementById('startPage').value.trim();
       const depth = +depthSlider.value;
       if (!start) return alert('Enter a start page.');
