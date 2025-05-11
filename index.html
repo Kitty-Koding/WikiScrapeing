@@ -2,113 +2,199 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Page Link Similarity</title>
+  <title>Wikipedia Link Graph</title>
   <style>
     body {
       font-family: Arial, sans-serif;
-      padding: 2em;
+      margin: 0;
+      padding: 1em;
     }
     input, button {
       padding: 0.5em;
-      margin-bottom: 1em;
-      display: block;
+      margin: 0.5em 0;
     }
-    pre {
-      background: #f4f4f4;
-      padding: 1em;
-      white-space: pre-wrap;
+    label {
+      display: block;
+      margin-top: 1em;
+    }
+    svg {
+      width: 100%;
+      height: 80vh;
       border: 1px solid #ccc;
     }
   </style>
 </head>
 <body>
-  <h1>Compare Wikipedia Pages by Shared Links</h1>
+  <h1>Wikipedia Link Graph Explorer</h1>
+  <label>
+    Starting Wikipedia Page:
+    <input type="text" id="startPage" placeholder="e.g., JavaScript" />
+  </label>
+  <label>
+    Depth (2–6):
+    <input type="range" min="2" max="6" value="2" id="depthSlider" />
+    <span id="depthValue">2</span>
+  </label>
+  <button onclick="startCrawl()">Generate Graph</button>
 
-  <label>First Wikipedia Page:</label>
-  <input type="text" id="page1" placeholder="e.g., JavaScript">
-  
-  <label>Second Wikipedia Page:</label>
-  <input type="text" id="page2" placeholder="e.g., Python (programming language)">
-  
-  <button onclick="comparePages()">Compare</button>
+  <svg id="graph"></svg>
 
-  <h2>Results</h2>
-  <pre id="output">Enter two Wikipedia pages to compare.</pre>
-
+  <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    async function fetchPageLinks(title) {
-      const encodedTitle = encodeURIComponent(title);
-      let continueToken = '';
-      let links = [];
+    document.getElementById("depthSlider").addEventListener("input", function() {
+      document.getElementById("depthValue").textContent = this.value;
+    });
+
+    const visited = new Set();
+    const nodesMap = new Map();
+    const links = [];
+
+    async function fetchLinks(title) {
+      const encoded = encodeURIComponent(title);
+      let cont = '';
+      let results = [];
 
       try {
         do {
-          const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${encodedTitle}&pllimit=max&format=json&origin=*${continueToken}`;
-          const response = await fetch(url);
-          const json = await response.json();
+          const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${encoded}&pllimit=max&format=json&origin=*${cont}`;
+          const res = await fetch(url);
+          const data = await res.json();
 
-          const pages = json.query.pages;
-          const page = Object.values(pages)[0];
-
+          const page = Object.values(data.query.pages)[0];
           if (page.links) {
             const filtered = page.links
               .map(link => link.title)
               .filter(title => !title.match(/^(Category|Wikipedia|Help|File|Portal|Special|Template):/));
-            links.push(...filtered);
+            results.push(...filtered);
           }
 
-          if (json.continue && json.continue.plcontinue) {
-            continueToken = `&plcontinue=${json.continue.plcontinue}`;
-          } else {
-            continueToken = '';
+          cont = data.continue ? `&plcontinue=${data.continue.plcontinue}` : '';
+        } while (cont);
+      } catch (e) {
+        console.error("Failed fetching:", title, e);
+      }
+
+      return [...new Set(results)];
+    }
+
+    async function crawl(title, maxDepth) {
+      const queue = [{ title, depth: 0 }];
+      visited.clear();
+      nodesMap.clear();
+      links.length = 0;
+
+      while (queue.length > 0) {
+        const { title, depth } = queue.shift();
+        if (depth > maxDepth || visited.has(title)) continue;
+
+        visited.add(title);
+        const node = { id: title, group: depth };
+        nodesMap.set(title, node);
+
+        const neighbors = await fetchLinks(title);
+        for (const neighbor of neighbors) {
+          links.push({ source: title, target: neighbor });
+          if (!visited.has(neighbor)) {
+            queue.push({ title: neighbor, depth: depth + 1 });
           }
-
-        } while (continueToken);
-
-        return links;
-      } catch (err) {
-        console.error("Error fetching links:", err);
-        return [];
+        }
       }
     }
 
-    async function comparePages() {
-      const title1 = document.getElementById("page1").value.trim();
-      const title2 = document.getElementById("page2").value.trim();
-      const output = document.getElementById("output");
+    async function startCrawl() {
+      const startTitle = document.getElementById("startPage").value.trim();
+      const depth = parseInt(document.getElementById("depthSlider").value);
 
-      if (!title1 || !title2) {
-        alert("Please enter two Wikipedia page titles.");
+      if (!startTitle) {
+        alert("Please enter a starting Wikipedia page.");
         return;
       }
 
-      output.textContent = "Fetching and comparing pages...";
+      document.getElementById("graph").innerHTML = ""; // Clear previous
+      await crawl(startTitle, depth);
+      drawGraph();
+    }
 
-      const [links1, links2] = await Promise.all([
-        fetchPageLinks(title1),
-        fetchPageLinks(title2)
-      ]);
+    function drawGraph() {
+      const svg = d3.select("#graph");
+      const width = svg.node().clientWidth;
+      const height = svg.node().clientHeight;
 
-      const set1 = new Set(links1);
-      const set2 = new Set(links2);
+      const nodes = Array.from(nodesMap.values());
 
-      const shared = [...set1].filter(link => set2.has(link));
-      const averageLength = (set1.size + set2.size) / 2;
-      const similarityScore = averageLength === 0 ? 0 : shared.length / averageLength;
+      const color = d3.scaleOrdinal(d3.schemeCategory10);
 
-      const data = [
-        { node: title1, links: links1 },
-        { node: title2, links: links2 }
-      ];
+      const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id(d => d.id).distance(60))
+        .force("charge", d3.forceManyBody().strength(-100))
+        .force("center", d3.forceCenter(width / 2, height / 2));
 
-      output.textContent = 
-`Data Structure:
-${JSON.stringify(data, null, 2)}
+      svg.selectAll("*").remove(); // Clear
 
-Shared Links (${shared.length}):
-${shared.join('\n')}
+      const link = svg.append("g")
+        .attr("stroke", "#aaa")
+        .selectAll("line")
+        .data(links)
+        .join("line")
+        .attr("stroke-width", 1);
 
-Similarity Score: ${similarityScore.toFixed(3)}`;
+      const node = svg.append("g")
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 1.5)
+        .selectAll("circle")
+        .data(nodes)
+        .join("circle")
+        .attr("r", 5)
+        .attr("fill", d => color(d.group))
+        .call(drag(simulation));
+
+      const label = svg.append("g")
+        .selectAll("text")
+        .data(nodes)
+        .join("text")
+        .text(d => d.id)
+        .attr("font-size", "10px")
+        .attr("fill", "#333");
+
+      simulation.on("tick", () => {
+        link
+          .attr("x1", d => d.source.x)
+          .attr("y1", d => d.source.y)
+          .attr("x2", d => d.target.x)
+          .attr("y2", d => d.target.y);
+
+        node
+          .attr("cx", d => d.x)
+          .attr("cy", d => d.y);
+
+        label
+          .attr("x", d => d.x + 6)
+          .attr("y", d => d.y + 2);
+      });
+    }
+
+    function drag(simulation) {
+      function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      }
+
+      function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+      }
+
+      function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      }
+
+      return d3.drag()
+        .on("start", dragstarted)
+        .on("drag", dragged)
+        .on("end", dragended);
     }
   </script>
 </body>
