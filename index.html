@@ -2,40 +2,41 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Links Fetcher</title>
+  <title>Wikipedia Page Link Similarity</title>
   <style>
     body {
-      font-family: sans-serif;
+      font-family: Arial, sans-serif;
       padding: 2em;
     }
     input, button {
       padding: 0.5em;
-      margin-right: 0.5em;
+      margin-bottom: 1em;
+      display: block;
     }
     pre {
-      background-color: #f0f0f0;
+      background: #f4f4f4;
       padding: 1em;
-      overflow-x: auto;
+      white-space: pre-wrap;
+      border: 1px solid #ccc;
     }
   </style>
 </head>
 <body>
-  <h1>Wikipedia Page Link Extractor</h1>
-  <input type="text" id="pageTitle" placeholder="Enter Wikipedia page title">
-  <button onclick="fetchWikipediaLinks()">Fetch Links</button>
+  <h1>Compare Wikipedia Pages by Shared Links</h1>
+
+  <label>First Wikipedia Page:</label>
+  <input type="text" id="page1" placeholder="e.g., JavaScript">
+  
+  <label>Second Wikipedia Page:</label>
+  <input type="text" id="page2" placeholder="e.g., Python (programming language)">
+  
+  <button onclick="comparePages()">Compare</button>
+
   <h2>Results</h2>
-  <pre id="output">No data yet.</pre>
+  <pre id="output">Enter two Wikipedia pages to compare.</pre>
 
   <script>
-    let data = [];
-
-    async function fetchWikipediaLinks() {
-      const title = document.getElementById('pageTitle').value.trim();
-      if (!title) {
-        alert("Please enter a Wikipedia page title.");
-        return;
-      }
-
+    async function fetchPageLinks(title) {
       const encodedTitle = encodeURIComponent(title);
       let continueToken = '';
       let links = [];
@@ -48,8 +49,12 @@
 
           const pages = json.query.pages;
           const page = Object.values(pages)[0];
+
           if (page.links) {
-            links.push(...page.links.map(link => link.title));
+            const filtered = page.links
+              .map(link => link.title)
+              .filter(title => !title.match(/^(Category|Wikipedia|Help|File|Portal|Special|Template):/));
+            links.push(...filtered);
           }
 
           if (json.continue && json.continue.plcontinue) {
@@ -60,12 +65,50 @@
 
         } while (continueToken);
 
-        data = [{ node: title, links }];
-        document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-      } catch (error) {
-        console.error(error);
-        document.getElementById('output').textContent = 'Error fetching data.';
+        return links;
+      } catch (err) {
+        console.error("Error fetching links:", err);
+        return [];
       }
+    }
+
+    async function comparePages() {
+      const title1 = document.getElementById("page1").value.trim();
+      const title2 = document.getElementById("page2").value.trim();
+      const output = document.getElementById("output");
+
+      if (!title1 || !title2) {
+        alert("Please enter two Wikipedia page titles.");
+        return;
+      }
+
+      output.textContent = "Fetching and comparing pages...";
+
+      const [links1, links2] = await Promise.all([
+        fetchPageLinks(title1),
+        fetchPageLinks(title2)
+      ]);
+
+      const set1 = new Set(links1);
+      const set2 = new Set(links2);
+
+      const shared = [...set1].filter(link => set2.has(link));
+      const averageLength = (set1.size + set2.size) / 2;
+      const similarityScore = averageLength === 0 ? 0 : shared.length / averageLength;
+
+      const data = [
+        { node: title1, links: links1 },
+        { node: title2, links: links2 }
+      ];
+
+      output.textContent = 
+`Data Structure:
+${JSON.stringify(data, null, 2)}
+
+Shared Links (${shared.length}):
+${shared.join('\n')}
+
+Similarity Score: ${similarityScore.toFixed(3)}`;
     }
   </script>
 </body>
