@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Link Graph with Clusters</title>
+  <title>Wikipedia Link Graph Explorer</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 1em; }
     input, button { padding: 0.5em; margin: 0.5em 0; }
     label { display: block; margin-top: 1em; }
-    #status { margin: .5em 0; color: #555; }
+    #status { margin: .5em 0; color: #555; white-space: pre; }
     svg { width: 100%; height: 80vh; border: 1px solid #ccc; }
     #tooltip {
       position: absolute; pointer-events: none;
@@ -50,10 +50,16 @@
       depthValue.textContent = depthSlider.value;
     });
 
-    // Zoom & pan
+    // Zoom & pan + label toggle
+    const ZOOM_LABEL_THRESHOLD = 1.5;
     svg.call(d3.zoom()
       .scaleExtent([0.1, 4])
-      .on('zoom', ({transform}) => container.attr('transform', transform)));
+      .on('zoom', ({transform, sourceEvent}) => {
+        container.attr('transform', transform);
+        // toggle labels based on zoom scale
+        container.selectAll('text')
+          .style('display', transform.k >= ZOOM_LABEL_THRESHOLD ? 'block' : 'none');
+      }));
 
     async function fetchLinks(title) {
       const enc = encodeURIComponent(title), all = [];
@@ -75,69 +81,48 @@
       return Array.from(new Set(all));
     }
 
+    // BFS by depth to compute per-level counts
     async function crawl(start, maxDepth) {
       statusEl.textContent = 'Crawling…';
       const nodesMap = new Map(), links = [];
-      const visited = new Set(), queue = [{title: start, depth: 0}];
+      const levels = [[start]];
       nodesMap.set(start, {id: start, depth: 0});
 
-      while (queue.length) {
-        const {title, depth} = queue.shift();
-        if (depth > maxDepth || visited.has(title)) continue;
-        visited.add(title);
+      for (let depth = 0; depth <= maxDepth; depth++) {
+        const current = levels[depth] || [];
+        const total   = current.length;
+        if (!total) continue;
+        const next    = [];
 
-        statusEl.textContent = `Fetching "${title}" (depth ${depth})…`;
-        const neigh = await fetchLinks(title);
-        neigh.forEach(tgt => {
-          if (!nodesMap.has(tgt)) nodesMap.set(tgt, {id: tgt, depth: depth+1});
-          links.push({source: title, target: tgt});
-          if (depth < maxDepth) queue.push({title: tgt, depth: depth+1});
-        });
+        for (let i = 0; i < total; i++) {
+          const title = current[i];
+          statusEl.textContent = 
+            `Fetching "${title}" (depth ${depth}) – ` +
+            `${i+1}/${total} (${Math.round((i+1)/total*100)}%)`;
+
+          const neigh = await fetchLinks(title);
+          neigh.forEach(tgt => {
+            if (!nodesMap.has(tgt)) {
+              nodesMap.set(tgt, {id: tgt, depth: depth+1});
+              if (depth+1 <= maxDepth) next.push(tgt);
+            }
+            links.push({source: title, target: tgt});
+          });
+        }
+        levels[depth+1] = next;
       }
-      statusEl.textContent = `Done crawl: ${nodesMap.size} nodes, ${links.length} links.`;
+
+      statusEl.textContent = 
+        `Done crawl:\n` +
+        `• Nodes: ${nodesMap.size}\n` +
+        `• Links: ${links.length}`;
       return {nodes: Array.from(nodesMap.values()), links};
     }
 
-    // Label Propagation community detection
-    function detectCommunities(nodes, links, iterations=10) {
-      const labels = {}, adj = {};
-      nodes.forEach(n => { labels[n.id] = n.id; adj[n.id] = []; });
-      links.forEach(l => {
-        adj[l.source].push(l.target);
-        adj[l.target].push(l.source);
-      });
-      for (let it=0; it<iterations; it++) {
-        nodes.forEach(n => {
-          const counts = {};
-          adj[n.id].forEach(nb => {
-            const lab = labels[nb];
-            counts[lab] = (counts[lab]||0) + 1;
-          });
-          let best = labels[n.id], max = 0;
-          for (const lab in counts) {
-            if (counts[lab] > max || (counts[lab]===max && lab<best)) {
-              best = lab; max = counts[lab];
-            }
-          }
-          labels[n.id] = best;
-        });
-      }
-      // remap labels to 0…k-1
-      const mapping = {}, clusters = 0;
-      let idx=0;
-      for (const id in labels) {
-        const lab = labels[id];
-        if (!(lab in mapping)) mapping[lab] = idx++;
-        nodes.find(n=>n.id===id).cluster = mapping[lab];
-      }
-    }
-
     function draw({nodes, links}) {
-      statusEl.textContent = 'Detecting communities…';
-      detectCommunities(nodes, links, 15);
-
       statusEl.textContent = 'Rendering graph…';
       container.selectAll('*').remove();
+
       const width  = +svg.node().clientWidth;
       const height = +svg.node().clientHeight;
       const color  = d3.scaleOrdinal(d3.schemeCategory10);
@@ -146,78 +131,77 @@
         .force('link', d3.forceLink(links).id(d=>d.id).distance(60).strength(0.1))
         .force('charge', d3.forceManyBody().strength(-50))
         .force('center', d3.forceCenter(width/2, height/2))
-        .force('cluster', clusteringForce())
-        .alphaDecay(0.03);
+        .alphaDecay(0.05);
 
-      // draw links
+      // links with low opacity
       container.append('g')
         .attr('stroke','#aaa')
+        .attr('stroke-opacity', 0.2)
         .selectAll('line')
         .data(links)
         .join('line');
 
-      // draw nodes
+      // nodes without stroke
       const node = container.append('g')
-        .attr('stroke','#fff').attr('stroke-width',1.5)
         .selectAll('circle')
         .data(nodes)
         .join('circle')
           .attr('r', 6)
-          .attr('fill', d=>color(d.cluster))
-          .call(d3.drag()
-            .on('start', (e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
-            .on('drag',  (e,d)=>{ d.fx=e.x; d.fy=e.y; })
-            .on('end',   (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
-          .on('mouseover', (e,d)=> {
-            tooltipEl.style('display','block').text(d.id);
+          .attr('fill', d => color(d.depth))
+          .on('mouseover', (e,d) => {
+            tooltipEl
+              .style('display','block')
+              .text(d.id);
           })
-          .on('mousemove', (e)=> {
-            tooltipEl.style('top', (e.pageY+10)+'px').style('left', (e.pageX+10)+'px');
+          .on('mousemove', (e) => {
+            tooltipEl
+              .style('top',  (e.pageY+10)+'px')
+              .style('left', (e.pageX+10)+'px');
           })
-          .on('mouseout', ()=> {
+          .on('mouseout', () => {
             tooltipEl.style('display','none');
-          });
+          })
+          .call(d3.drag()
+            .on('start', (e,d) => {
+              if (!e.active) sim.alphaTarget(0.3).restart();
+              d.fx = d.x; d.fy = d.y;
+            })
+            .on('drag',  (e,d) => { d.fx = e.x; d.fy = e.y; })
+            .on('end',   (e,d) => {
+              if (!e.active) sim.alphaTarget(0);
+              d.fx = null; d.fy = null;
+            }));
 
-      sim.on('tick', ()=>{
+      // hidden labels initially
+      container.append('g')
+        .selectAll('text')
+        .data(nodes)
+        .join('text')
+          .text(d => d.id)
+          .attr('font-size','9px')
+          .attr('dx',8).attr('dy',4)
+          .style('display','none');
+
+      sim.on('tick', () => {
         container.selectAll('line')
-          .attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
-          .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+          .attr('x1', d=>d.source.x)
+          .attr('y1', d=>d.source.y)
+          .attr('x2', d=>d.target.x)
+          .attr('y2', d=>d.target.y);
+
         node
-          .attr('cx', d=>d.x).attr('cy', d=>d.y);
+          .attr('cx', d=>d.x)
+          .attr('cy', d=>d.y);
+
+        container.selectAll('text')
+          .attr('x', d=>d.x)
+          .attr('y', d=>d.y);
       });
-      statusEl.textContent = 'Graph ready.';
+
+      statusEl.textContent = 'Graph ready. Zoom in ≥'+ZOOM_LABEL_THRESHOLD+'× to see labels.';
     }
 
-    // custom force to pull nodes toward their cluster centroid
-    function clusteringForce() {
-      let nodes;
-      function force(alpha) {
-        const centroids = {};
-        const counts = {};
-        nodes.forEach(d => {
-          if (!(d.cluster in centroids)) {
-            centroids[d.cluster] = {x:0,y:0};
-            counts[d.cluster] = 0;
-          }
-          centroids[d.cluster].x += d.x;
-          centroids[d.cluster].y += d.y;
-          counts[d.cluster]++;
-        });
-        for (const c in centroids) {
-          centroids[c].x /= counts[c];
-          centroids[c].y /= counts[c];
-        }
-        nodes.forEach(d => {
-          const c = centroids[d.cluster];
-          d.vx += (c.x - d.x) * 0.02 * alpha;
-          d.vy += (c.y - d.y) * 0.02 * alpha;
-        });
-      }
-      force.initialize = _ => nodes = _;
-      return force;
-    }
-
-    goBtn.addEventListener('click', async ()=>{
+    goBtn.addEventListener('click', async () => {
       const start = document.getElementById('startPage').value.trim();
       const depth = +depthSlider.value;
       if (!start) return alert('Enter a start page.');
