@@ -2,200 +2,178 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Link Graph</title>
+  <title>Wikipedia Link Graph Explorer</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 1em;
-    }
-    input, button {
-      padding: 0.5em;
-      margin: 0.5em 0;
-    }
-    label {
-      display: block;
-      margin-top: 1em;
-    }
-    svg {
-      width: 100%;
-      height: 80vh;
-      border: 1px solid #ccc;
-    }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 1em; }
+    input, button { padding: 0.5em; margin: 0.5em 0; }
+    label { display: block; margin-top: 1em; }
+    #status { margin: .5em 0; color: #555; }
+    svg { width: 100%; height: 80vh; border: 1px solid #ccc; }
   </style>
 </head>
 <body>
   <h1>Wikipedia Link Graph Explorer</h1>
+
   <label>
-    Starting Wikipedia Page:
-    <input type="text" id="startPage" placeholder="e.g., JavaScript" />
+    Starting page:
+    <input type="text" id="startPage" placeholder="e.g. JavaScript">
   </label>
   <label>
     Depth (2–6):
-    <input type="range" min="2" max="6" value="2" id="depthSlider" />
+    <input type="range" id="depthSlider" min="2" max="6" value="2">
     <span id="depthValue">2</span>
   </label>
-  <button onclick="startCrawl()">Generate Graph</button>
+  <button id="goBtn">Generate Graph</button>
+  <div id="status">Idle.</div>
 
   <svg id="graph"></svg>
 
+  <!-- D3 -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    document.getElementById("depthSlider").addEventListener("input", function() {
-      document.getElementById("depthValue").textContent = this.value;
+    // UI refs
+    const depthSlider = document.getElementById('depthSlider');
+    const depthValue  = document.getElementById('depthValue');
+    const statusEl    = document.getElementById('status');
+    const goBtn       = document.getElementById('goBtn');
+    const svgEl       = d3.select('#graph');
+
+    depthSlider.addEventListener('input', () => {
+      depthValue.textContent = depthSlider.value;
     });
 
-    const visited = new Set();
-    const nodesMap = new Map();
-    const links = [];
+    // Crawler state
+    let nodesMap, links;
 
     async function fetchLinks(title) {
       const encoded = encodeURIComponent(title);
       let cont = '';
-      let results = [];
-
-      try {
-        do {
-          const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${encoded}&pllimit=max&format=json&origin=*${cont}`;
-          const res = await fetch(url);
-          const data = await res.json();
-
-          const page = Object.values(data.query.pages)[0];
-          if (page.links) {
-            const filtered = page.links
-              .map(link => link.title)
-              .filter(title => !title.match(/^(Category|Wikipedia|Help|File|Portal|Special|Template):/));
-            results.push(...filtered);
-          }
-
-          cont = data.continue ? `&plcontinue=${data.continue.plcontinue}` : '';
-        } while (cont);
-      } catch (e) {
-        console.error("Failed fetching:", title, e);
-      }
-
-      return [...new Set(results)];
+      let all = [];
+      do {
+        const url =
+          `https://en.wikipedia.org/w/api.php` +
+          `?action=query&prop=links&titles=${encoded}` +
+          `&pllimit=max&format=json&origin=*${cont}`;
+        const res = await fetch(url);
+        const j   = await res.json();
+        const page = Object.values(j.query.pages)[0];
+        if (page.links) {
+          all.push(
+            ...page.links
+              .map(l => l.title)
+              .filter(t => !/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(t))
+          );
+        }
+        cont = j.continue ? `&plcontinue=${j.continue.plcontinue}` : '';
+      } while (cont);
+      return Array.from(new Set(all));
     }
 
-    async function crawl(title, maxDepth) {
-      const queue = [{ title, depth: 0 }];
-      visited.clear();
-      nodesMap.clear();
-      links.length = 0;
+    async function crawl(start, maxDepth) {
+      statusEl.textContent = 'Crawling…';
+      // reset
+      nodesMap = new Map();
+      links    = [];
+      const visited = new Set();
+      const queue = [{ title: start, depth: 0 }];
 
-      while (queue.length > 0) {
+      // seed the start node
+      nodesMap.set(start, { id: start, group: 0 });
+
+      while (queue.length) {
         const { title, depth } = queue.shift();
-        if (depth > maxDepth || visited.has(title)) continue;
-
+        if (depth > maxDepth) continue;
+        if (visited.has(title))       continue;
         visited.add(title);
-        const node = { id: title, group: depth };
-        nodesMap.set(title, node);
 
-        const neighbors = await fetchLinks(title);
-        for (const neighbor of neighbors) {
-          links.push({ source: title, target: neighbor });
-          if (!visited.has(neighbor)) {
-            queue.push({ title: neighbor, depth: depth + 1 });
+        statusEl.textContent = `Fetching "${title}" at depth ${depth}…`;
+        const neigh = await fetchLinks(title);
+
+        for (const tgt of neigh) {
+          // ensure target node exists (so every link has a node)
+          if (!nodesMap.has(tgt)) {
+            nodesMap.set(tgt, { id: tgt, group: depth + 1 });
+          }
+          links.push({ source: title, target: tgt });
+          // only enqueue if we still have depth budget
+          if (depth < maxDepth) {
+            queue.push({ title: tgt, depth: depth + 1 });
           }
         }
       }
+      statusEl.textContent = `Done: ${nodesMap.size} nodes, ${links.length} links.`;
     }
 
-    async function startCrawl() {
-      const startTitle = document.getElementById("startPage").value.trim();
-      const depth = parseInt(document.getElementById("depthSlider").value);
+    function draw() {
+      statusEl.textContent = 'Rendering graph…';
+      const nodesArr = Array.from(nodesMap.values());
+      const width  = +svgEl.node().clientWidth;
+      const height = +svgEl.node().clientHeight;
+      const color  = d3.scaleOrdinal(d3.schemeCategory10);
 
-      if (!startTitle) {
-        alert("Please enter a starting Wikipedia page.");
-        return;
-      }
+      const sim = d3.forceSimulation(nodesArr)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(60))
+        .force('charge', d3.forceManyBody().strength(-120))
+        .force('center', d3.forceCenter(width/2, height/2));
 
-      document.getElementById("graph").innerHTML = ""; // Clear previous
-      await crawl(startTitle, depth);
-      drawGraph();
-    }
+      svgEl.selectAll('*').remove();
 
-    function drawGraph() {
-      const svg = d3.select("#graph");
-      const width = svg.node().clientWidth;
-      const height = svg.node().clientHeight;
-
-      const nodes = Array.from(nodesMap.values());
-
-      const color = d3.scaleOrdinal(d3.schemeCategory10);
-
-      const simulation = d3.forceSimulation(nodes)
-        .force("link", d3.forceLink(links).id(d => d.id).distance(60))
-        .force("charge", d3.forceManyBody().strength(-100))
-        .force("center", d3.forceCenter(width / 2, height / 2));
-
-      svg.selectAll("*").remove(); // Clear
-
-      const link = svg.append("g")
-        .attr("stroke", "#aaa")
-        .selectAll("line")
+      const link = svgEl.append('g')
+          .attr('stroke','#aaa')
+        .selectAll('line')
         .data(links)
-        .join("line")
-        .attr("stroke-width", 1);
+        .join('line');
 
-      const node = svg.append("g")
-        .attr("stroke", "#fff")
-        .attr("stroke-width", 1.5)
-        .selectAll("circle")
-        .data(nodes)
-        .join("circle")
-        .attr("r", 5)
-        .attr("fill", d => color(d.group))
-        .call(drag(simulation));
+      const node = svgEl.append('g')
+          .attr('stroke','#fff').attr('stroke-width',1.5)
+        .selectAll('circle')
+        .data(nodesArr)
+        .join('circle')
+          .attr('r', 6)
+          .attr('fill', d => color(d.group))
+          .call(d3.drag()
+            .on('start', (e,d) => {
+              if (!e.active) sim.alphaTarget(0.3).restart();
+              d.fx = d.x; d.fy = d.y;
+            })
+            .on('drag', (e,d) => { d.fx = e.x; d.fy = e.y; })
+            .on('end',  (e,d) => {
+              if (!e.active) sim.alphaTarget(0);
+              d.fx = null; d.fy = null;
+            }));
 
-      const label = svg.append("g")
-        .selectAll("text")
-        .data(nodes)
-        .join("text")
-        .text(d => d.id)
-        .attr("font-size", "10px")
-        .attr("fill", "#333");
+      const label = svgEl.append('g')
+        .selectAll('text')
+        .data(nodesArr)
+        .join('text')
+          .text(d => d.id)
+          .attr('font-size','9px')
+          .attr('dx',8)
+          .attr('dy',4);
 
-      simulation.on("tick", () => {
+      sim.on('tick', () => {
         link
-          .attr("x1", d => d.source.x)
-          .attr("y1", d => d.source.y)
-          .attr("x2", d => d.target.x)
-          .attr("y2", d => d.target.y);
-
+          .attr('x1', d=>d.source.x)
+          .attr('y1', d=>d.source.y)
+          .attr('x2', d=>d.target.x)
+          .attr('y2', d=>d.target.y);
         node
-          .attr("cx", d => d.x)
-          .attr("cy", d => d.y);
-
+          .attr('cx', d=>d.x)
+          .attr('cy', d=>d.y);
         label
-          .attr("x", d => d.x + 6)
-          .attr("y", d => d.y + 2);
+          .attr('x', d=>d.x)
+          .attr('y', d=>d.y);
       });
+      statusEl.textContent = 'Graph ready.';
     }
 
-    function drag(simulation) {
-      function dragstarted(event, d) {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
-      }
-
-      function dragged(event, d) {
-        d.fx = event.x;
-        d.fy = event.y;
-      }
-
-      function dragended(event, d) {
-        if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
-      }
-
-      return d3.drag()
-        .on("start", dragstarted)
-        .on("drag", dragged)
-        .on("end", dragended);
-    }
+    goBtn.addEventListener('click', async () => {
+      const start = document.getElementById('startPage').value.trim();
+      const depth = +depthSlider.value;
+      if (!start) { alert('Enter a start page.'); return; }
+      await crawl(start, depth);
+      draw();
+    });
   </script>
 </body>
 </html>
