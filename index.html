@@ -97,8 +97,8 @@
         for (let i = 0; i < total; i++) {
           const title = current[i];
           statusEl.textContent = 
-            `Fetching "${title}" (depth ${depth}) – ` +
-            `${i+1}/${total} (${Math.round((i+1)/total*100)}%)`;
+            `(depth ${depth}) – ` +
+            `${i+1}/${total} (${Math.round((i+1)/total*100)}%) -`+`Fetching "${title}"` ;
 
           const neigh = await fetchLinks(title);
           neigh.forEach(tgt => {
