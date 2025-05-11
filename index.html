@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wikipedia Links Fetcher</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 2em;
+    }
+    input, button {
+      padding: 0.5em;
+      margin-right: 0.5em;
+    }
+    pre {
+      background-color: #f0f0f0;
+      padding: 1em;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Wikipedia Page Link Extractor</h1>
+  <input type="text" id="pageTitle" placeholder="Enter Wikipedia page title">
+  <button onclick="fetchWikipediaLinks()">Fetch Links</button>
+  <h2>Results</h2>
+  <pre id="output">No data yet.</pre>
+
+  <script>
+    let data = [];
+
+    async function fetchWikipediaLinks() {
+      const title = document.getElementById('pageTitle').value.trim();
+      if (!title) {
+        alert("Please enter a Wikipedia page title.");
+        return;
+      }
+
+      const encodedTitle = encodeURIComponent(title);
+      let continueToken = '';
+      let links = [];
+
+      try {
+        do {
+          const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${encodedTitle}&pllimit=max&format=json&origin=*${continueToken}`;
+          const response = await fetch(url);
+          const json = await response.json();
+
+          const pages = json.query.pages;
+          const page = Object.values(pages)[0];
+          if (page.links) {
+            links.push(...page.links.map(link => link.title));
+          }
+
+          if (json.continue && json.continue.plcontinue) {
+            continueToken = `&plcontinue=${json.continue.plcontinue}`;
+          } else {
+            continueToken = '';
+          }
+
+        } while (continueToken);
+
+        data = [{ node: title, links }];
+        document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        console.error(error);
+        document.getElementById('output').textContent = 'Error fetching data.';
+      }
+    }
+  </script>
+</body>
+</html>
