@@ -10,6 +10,8 @@
       --bg: #ecf0f1;
       --text: #34495e;
       --segment-bg: #ddd;
+      --segment-filled: var(--accent);
+      --segment-empty: #bbb;
     }
     * { box-sizing: border-box; }
     body {
@@ -42,21 +44,23 @@
       cursor: pointer; font-size: 1em;
     }
     .controls button:disabled { opacity: 0.6; cursor: not-allowed; }
+
     #progressBar {
       margin: 1em 0; width: 100%; max-width: 480px;
       display: flex; height: 1.2em; border-radius: 4px;
       overflow: hidden; background: var(--segment-bg);
     }
     .segment {
-      position: relative;
-      height: 100%;
+      position: relative; flex: 1; height: 100%;
+      background: var(--segment-empty);
     }
     .segment .fill {
       position: absolute; top:0; left:0; bottom:0;
-      background: var(--accent);
+      background: var(--segment-filled);
       width: 0%;
+      transition: width 0.2s linear;
     }
-    #status, #eta, #depthStatus, #filesizes {
+    #depthStatus, #status, #eta, #filesizes {
       margin: 0.3em 0; font-size: 0.9em; text-align: center;
     }
     #filesizes span { display: block; }
@@ -102,6 +106,19 @@
       return `${m}m ${r}s`;
     }
 
+    function initSegments(maxDepth) {
+      progressBar.innerHTML = '';
+      for (let d=0; d<=maxDepth; d++) {
+        const seg = document.createElement('div');
+        seg.className = 'segment';
+        seg.dataset.depth = d;
+        const fill = document.createElement('div');
+        fill.className = 'fill';
+        seg.appendChild(fill);
+        progressBar.appendChild(seg);
+      }
+    }
+
     async function crawl(start, maxDepth) {
       // state
       const queue = [{id:start, depth:0}];
@@ -112,86 +129,78 @@
       let avgTime = 0;
 
       // per-depth counts
-      const depthCounts = {}, doneCounts = {};
+      const depthCounts = Array(maxDepth+1).fill(0);
+      const doneCounts  = Array(maxDepth+1).fill(0);
 
-      function rebuildProgressBar() {
-        progressBar.innerHTML = '';
-        for (let d = 0; d <= maxDepth; d++) {
-          const cnt = depthCounts[d] || 0;
-          const doneAtD = doneCounts[d] || 0;
-          // always render a segment, even if 0
-          const seg = document.createElement('div');
-          seg.className = 'segment';
-          seg.style.flex = cnt;
-          // fill
-          const fill = document.createElement('div');
-          fill.className = 'fill';
-          const pct = cnt>0 ? (doneAtD/cnt*100) : 0;
-          fill.style.width = pct + '%';
-          seg.appendChild(fill);
-          seg.title = `Depth ${d}: ${doneAtD}/${cnt}`;
-          progressBar.appendChild(seg);
-        }
-      }
-
-      function updateStatus() {
-        statusEl.textContent = `Processed ${done}/${total}`;
-        const rem = total - done;
-        const timeLeft = avgTime * rem;
-        etaEl.textContent = rem>0 ? `Time left: ${formatTime(timeLeft)}` : '';
-        rebuildProgressBar();
-      }
-
+      initSegments(maxDepth);
       statusEl.textContent = 'Initializing…';
-      rebuildProgressBar();
+      etaEl.textContent = '';
+      depthEl.textContent = 'Depth: 0';
 
       const concurrency = 5;
       let active = 0;
 
       return new Promise(resolve => {
-        function next() {
+        function updateProgress() {
+          // update each segment’s fill
+          for (let d=0; d<=maxDepth; d++) {
+            const cnt = depthCounts[d];
+            const doneD = doneCounts[d];
+            const pct = cnt>0 ? (doneD/cnt*100) : 0;
+            const fill = progressBar.querySelector(`.segment[data-depth="${d}"] .fill`);
+            fill.style.width = pct + '%';
+          }
+          statusEl.textContent = `Processed ${done}/${total}`;
+          const rem = total - done;
+          const timeLeft = avgTime * rem;
+          etaEl.textContent = rem>0 ? `Time left: ${formatTime(timeLeft)}` : '';
+        }
+
+        function processNext() {
           if (!queue.length && active===0) {
             return resolve({nodes, links});
           }
           while (active < concurrency && queue.length) {
             const {id,depth} = queue.shift();
             active++;
-            // track how many to do at this depth
-            depthCounts[depth] = (depthCounts[depth]||0) + 1;
+            depthCounts[depth]++;
 
             const t0 = performance.now();
             fetchLinks(id).then(neigh=>{
               const t1 = performance.now();
               avgTime = ((avgTime*done)+(t1-t0)) / (done+1);
 
-              // record node
-              nodes.push({id, depth});
-              doneCounts[depth] = (doneCounts[depth]||0) + 1;
+              nodes.push({id,depth});
+              doneCounts[depth]++;
 
               neigh.forEach(nb=>{
-                const key = id + '→' + nb;
+                const key = id+'→'+nb;
                 if (!edgeSet.has(key)) {
                   edgeSet.add(key);
-                  links.push({source: id, target: nb});
+                  links.push({source:id,target:nb});
                 }
-                if (!visited.has(nb) && depth+1 <= maxDepth) {
+                if (depth+1<=maxDepth && !visited.has(nb)) {
                   visited.add(nb);
-                  queue.push({id: nb, depth: depth+1});
+                  queue.push({id:nb,depth:depth+1});
                   total++;
+                  depthCounts[depth+1]++; // account early for next depth
                 }
               });
             }).catch(()=>{
-              // even on error count as done
-              doneCounts[depth] = (doneCounts[depth]||0) + 1;
+              doneCounts[depth]++;
             }).finally(()=>{
               done++; active--;
-              depthEl.textContent = `Depth: ${queue[0]?.depth ?? maxDepth}`;
-              updateStatus();
-              next();
+              const currentDepth = queue.length 
+                ? queue[0].depth 
+                : maxDepth;
+              depthEl.textContent = `Depth: ${currentDepth}`;
+              updateProgress();
+              processNext();
             });
           }
         }
-        next();
+
+        processNext();
       });
     }
 
@@ -216,7 +225,7 @@
     }
 
     function prepareDownload(nodes, links) {
-      // build CSV blobs
+      // CSV blobs
       const nodeCsv = ['Id,Label,Depth']
         .concat(nodes.map(n=>`"${n.id}","${n.id}",${n.depth}`))
         .join('\n');
@@ -233,13 +242,13 @@
       `;
 
       downloadBtn.onclick = ()=>{
-        downloadBlob(nodeBlob,'nodes.csv');
-        downloadBlob(edgeBlob,'edges.csv');
+        download(name='nodes.csv', blob=nodeBlob);
+        download(name='edges.csv', blob=edgeBlob);
       };
       downloadBtn.disabled = false;
     }
 
-    function downloadBlob(blob, name) {
+    function download(name, blob) {
       const url = URL.createObjectURL(blob);
       const a   = document.createElement('a');
       a.href = url; a.download = name; a.click();
@@ -248,10 +257,8 @@
 
     startBtn.onclick = async ()=>{
       startBtn.disabled = downloadBtn.disabled = true;
-      statusEl.textContent = 'Starting crawl…';
-      etaEl.textContent = '';
       sizesEl.textContent = '';
-      progressBar.innerHTML = '';
+      statusEl.textContent = 'Starting crawl…';
       const {nodes,links} = await crawl(startInput.value.trim(), +depthSlider.value);
       statusEl.textContent = `Done: ${nodes.length} nodes, ${links.length} links.`;
       prepareDownload(nodes, links);
