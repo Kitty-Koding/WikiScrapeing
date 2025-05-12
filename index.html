@@ -5,23 +5,38 @@
   <title>Wikipedia Graph Explorer</title>
   <style>
     body { font-family: sans-serif; margin: 0; padding: 1em; }
-    input, button { padding: 0.5em; margin: 0.5em 0; }
-    #status { margin: 0.5em 0; }
-    svg { width: 100%; height: 80vh; border: 1px solid #ccc; display: block; }
+    input, button, label { margin: 0.2em; }
+    #controls { margin-bottom: 1em; }
+    #status { margin: 0.5em 0; white-space: pre; font-size: 0.9em; color: #555; }
+    svg { width: 100%; height: 70vh; border: 1px solid #ccc; display: block; }
     #tooltip {
-      position: absolute; background: #fff; padding: 4px 8px; border: 1px solid #333;
-      border-radius: 4px; pointer-events: none; display: none; font-size: 12px;
+      position: absolute; background: #fff; padding: 4px 8px; 
+      border: 1px solid #333; border-radius: 4px; 
+      pointer-events: none; display: none; font-size: 12px;
     }
-    #fps { position: fixed; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); color: #0f0;
-      font-family: monospace; padding: 4px 8px; border-radius: 4px; font-size: 14px; }
+    #fps { position: fixed; bottom: 10px; right: 10px;
+      background: rgba(0,0,0,0.7); color: #0f0;
+      font-family: monospace; padding: 4px 8px; border-radius: 4px; }
   </style>
 </head>
 <body>
   <h2>Wikipedia Graph Explorer</h2>
-  <label>Start page: <input id="startPage" value="JavaScript"></label>
-  <label>Depth: <input type="range" min="1" max="8" id="depthSlider" value="2"> <span id="depthLabel">2</span></label>
-  <button id="goBtn">Start</button>
-  <button id="toggleSim">Pause Layout</button>
+  <div id="controls">
+    <label>Start page: 
+      <input id="startPage" value="JavaScript">
+    </label>
+    <label>Depth (1–8):
+      <input type="range" min="1" max="8" id="depthSlider" value="2">
+      <span id="depthLabel">2</span>
+    </label>
+    <br>
+    <label><input type="radio" name="mode" value="incremental" checked> Incremental render</label>
+    <label><input type="radio" name="mode" value="after"> Render after load</label>
+    <button id="goBtn">Start Crawl</button>
+    <button id="downloadBtn">Download CSVs</button>
+    <button id="toggleSim">Pause Layout</button>
+  </div>
+
   <div id="status">Idle...</div>
   <svg id="graph"></svg>
   <div id="tooltip"></div>
@@ -29,173 +44,274 @@
 
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    const tooltip = d3.select('#tooltip');
-    const status = document.getElementById('status');
-    const depthSlider = document.getElementById('depthSlider');
-    const depthLabel = document.getElementById('depthLabel');
-    const fpsDisplay = document.getElementById('fps');
-    const toggleBtn = document.getElementById('toggleSim');
+  // --- UI Refs ---
+  const statusEl    = document.getElementById('status');
+  const startInput  = document.getElementById('startPage');
+  const depthSlider = document.getElementById('depthSlider');
+  const depthLabel  = document.getElementById('depthLabel');
+  const goBtn       = document.getElementById('goBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const toggleBtn   = document.getElementById('toggleSim');
+  const modeInputs  = document.getElementsByName('mode');
+  const tooltip     = d3.select('#tooltip');
+  const svg         = d3.select('#graph');
+  const fpsDisplay  = document.getElementById('fps');
 
-    let graphData = { nodes: [], links: [] }, graphMap = new Map();
-    let startNode = null;
-    let simulationPaused = false;
+  depthSlider.oninput = () => depthLabel.textContent = depthSlider.value;
 
-    // FPS Counter
-    let lastFrame = performance.now(), frameCount = 0;
-    function updateFPS() {
-      const now = performance.now();
-      frameCount++;
-      if (now - lastFrame >= 1000) {
-        fpsDisplay.textContent = `FPS: ${frameCount}`;
-        frameCount = 0;
-        lastFrame = now;
-      }
-      requestAnimationFrame(updateFPS);
+  // --- FPS Counter ---
+  let lastTime = performance.now(), frameCount = 0;
+  function tickFPS() {
+    const now = performance.now();
+    frameCount++;
+    if (now - lastTime >= 1000) {
+      fpsDisplay.textContent = 'FPS: ' + frameCount;
+      frameCount = 0;
+      lastTime = now;
     }
-    updateFPS();
+    requestAnimationFrame(tickFPS);
+  }
+  tickFPS();
 
-    depthSlider.oninput = () => depthLabel.textContent = depthSlider.value;
+  // --- Graph Data ---
+  let graph = { nodes: [], links: [] };
+  const nodeById = new Map();
+  const adjacency = new Map();
+  let startNodeId = null;
+  let simulation, linkSel, nodeSel, labelSel;
+  let simPaused = false;
 
-    toggleBtn.onclick = () => {
-      simulationPaused = !simulationPaused;
-      toggleBtn.textContent = simulationPaused ? 'Resume Layout' : 'Pause Layout';
-      if (!simulationPaused) sim.alpha(0.3).restart();
-    };
+  // --- SVG & Simulation Setup ---
+  const container = svg.append('g');
+  svg.call(d3.zoom().on('zoom', (e) => {
+    container.attr('transform', e.transform);
+  }));
 
-    async function fetchLinks(title) {
-      const enc = encodeURIComponent(title), all = new Set();
-      let cont = '';
-      do {
-        const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${enc}&pllimit=max&format=json&origin=*${cont}`;
-        const res = await fetch(url);
-        const json = await res.json();
-        const page = Object.values(json.query.pages)[0];
-        if (page.links) {
-          for (const l of page.links) {
-            if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title)) {
-              all.add(l.title);
-            }
-          }
-        }
-        cont = json.continue ? `&plcontinue=${json.continue.plcontinue}` : '';
-      } while (cont);
-      return Array.from(all);
-    }
+  function initSimulation() {
+    simulation = d3.forceSimulation()
+      .force('link', d3.forceLink().id(d => d.id).distance(40).strength(0.1))
+      .force('charge', d3.forceManyBody().strength(-20))
+      .force('center', d3.forceCenter(svg.node().clientWidth/2, svg.node().clientHeight/2))
+      .alphaDecay(0.05)
+      .on('tick', ticked);
+  }
 
-    async function crawl(start, maxDepth) {
-      graphData = { nodes: [], links: [] };
-      graphMap.clear();
-      const queue = [{ title: start, depth: 0 }];
-      const visited = new Set();
-      visited.add(start);
-      startNode = start;
+  function ticked() {
+    linkSel
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y);
 
-      while (queue.length) {
-        const current = queue.shift();
-        const { title, depth } = current;
-        status.textContent = `Fetching ${title} (depth ${depth}) - Remaining: ${queue.length}`;
-        const links = await fetchLinks(title);
+    nodeSel
+      .attr('cx', d => d.x)
+      .attr('cy', d => d.y);
 
-        if (!graphMap.has(title)) {
-          graphMap.set(title, { id: title, depth });
-          graphData.nodes.push(graphMap.get(title));
-        }
+    labelSel
+      .attr('x', d => d.x)
+      .attr('y', d => d.y + 4);
+  }
 
-        for (const l of links) {
-          if (!graphMap.has(l)) {
-            graphMap.set(l, { id: l, depth: depth + 1 });
-            graphData.nodes.push(graphMap.get(l));
-          }
-          graphData.links.push({ source: title, target: l });
-          if (!visited.has(l) && depth + 1 <= maxDepth) {
-            visited.add(l);
-            queue.push({ title: l, depth: depth + 1 });
-          }
-        }
-        drawGraph();
-      }
-    }
-
-    function shortestPath(targetId) {
-      const queue = [[targetId]], visited = new Set([targetId]);
-      while (queue.length) {
-        const path = queue.shift();
-        const node = path[0];
-        if (node === startNode) return path;
-        for (const l of graphData.links) {
-          if (l.target === node && !visited.has(l.source)) {
-            visited.add(l.source);
-            queue.push([l.source, ...path]);
-          }
-        }
-      }
-      return null;
-    }
-
-    const svg = d3.select('#graph');
-    const g = svg.append('g');
-    svg.call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
-
-    let sim = null;
-    function drawGraph() {
-      const color = d3.scaleOrdinal(d3.schemeTableau10);
-
-      if (!sim) {
-        sim = d3.forceSimulation(graphData.nodes)
-          .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(40))
-          .force('charge', d3.forceManyBody().strength(-20))
-          .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2));
-      }
-
-      const link = g.selectAll('line')
-        .data(graphData.links)
-        .join('line')
-        .attr('stroke', '#999')
-        .attr('stroke-opacity', 0.1);
-
-      const node = g.selectAll('circle')
-        .data(graphData.nodes)
-        .join('circle')
-        .attr('r', 4)
-        .attr('fill', d => color(d.depth))
-        .on('mouseover', (e, d) => {
-          tooltip.style('display', 'block').text(d.id);
-          const path = shortestPath(d.id);
-          if (path) {
-            link.attr('stroke', l => path.includes(l.source.id) && path.includes(l.target.id) ? 'red' : '#999')
-                .attr('stroke-opacity', l => path.includes(l.source.id) && path.includes(l.target.id) ? 1 : 0.1);
-          }
-        })
-        .on('mousemove', e => {
-          tooltip.style('top', (e.pageY + 10)+'px').style('left', (e.pageX + 10)+'px');
-        })
-        .on('mouseout', () => {
-          tooltip.style('display', 'none');
-          link.attr('stroke', '#999').attr('stroke-opacity', 0.1);
+  // --- Data & Rendering ---
+  async function fetchLinks(title) {
+    const enc = encodeURIComponent(title);
+    let cont = '', out = new Set();
+    do {
+      const url = `https://en.wikipedia.org/w/api.php` +
+                  `?action=query&prop=links&titles=${enc}` +
+                  `&pllimit=max&format=json&origin=*${cont}`;
+      const res = await fetch(url), json = await res.json();
+      const page = Object.values(json.query.pages)[0];
+      if (page.links) {
+        page.links.forEach(l => {
+          if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title))
+            out.add(l.title);
         });
-
-      if (!simulationPaused) {
-        sim.nodes(graphData.nodes);
-        sim.force('link').links(graphData.links);
-        sim.alpha(0.3).restart();
       }
+      cont = json.continue ? `&plcontinue=${json.continue.plcontinue}` : '';
+    } while (cont);
+    return Array.from(out);
+  }
 
-      sim.on('tick', () => {
-        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-        node.attr('cx', d => d.x).attr('cy', d => d.y);
+  function addNode(id, depth) {
+    if (!nodeById.has(id)) {
+      const node = { id, depth };
+      graph.nodes.push(node);
+      nodeById.set(id, node);
+      adjacency.set(id, new Set());
+    }
+  }
+
+  function addLink(a, b) {
+    adjacency.get(a).add(b);
+    adjacency.get(b).add(a);
+    graph.links.push({ source: a, target: b });
+  }
+
+  function updateSimulation() {
+    // bind
+    linkSel = container.selectAll('line')
+      .data(graph.links, d => d.source + '→' + d.target);
+    linkSel.exit().remove();
+    linkSel = linkSel.enter().append('line')
+        .attr('stroke','#999').attr('stroke-opacity',0.1)
+      .merge(linkSel);
+
+    nodeSel = container.selectAll('circle')
+      .data(graph.nodes, d => d.id);
+    nodeSel.exit().remove();
+    nodeSel = nodeSel.enter().append('circle')
+        .attr('r',4)
+        .attr('fill', d => d3.schemeCategory10[d.depth % 10])
+        .on('mouseover', handleMouseOver)
+        .on('mousemove', e => {
+          tooltip.style('top',  (e.pageY+10)+'px')
+                 .style('left', (e.pageX+10)+'px');
+        })
+        .on('mouseout', handleMouseOut)
+        .call(d3.drag()
+          .on('start', dragstarted)
+          .on('drag',  dragged)
+          .on('end',   dragended))
+      .merge(nodeSel);
+
+    labelSel = container.selectAll('text')
+      .data(graph.nodes, d => d.id);
+    labelSel.exit().remove();
+    labelSel = labelSel.enter().append('text')
+        .text(d => d.id)
+        .attr('font-size','8px')
+        .attr('text-anchor','middle')
+        .attr('pointer-events','none')
+      .merge(labelSel);
+
+    simulation.nodes(graph.nodes);
+    simulation.force('link').links(graph.links);
+    if (!simPaused) simulation.alpha(0.3).restart();
+  }
+
+  // --- Shortest Path BFS (from startNodeId) ---
+  function shortestPath(toId) {
+    const queue = [[startNodeId]];
+    const seen = new Set([startNodeId]);
+    while (queue.length) {
+      const path = queue.shift();
+      const node = path[path.length - 1];
+      if (node === toId) return path;
+      adjacency.get(node).forEach(nb => {
+        if (!seen.has(nb)) {
+          seen.add(nb);
+          queue.push(path.concat(nb));
+        }
       });
     }
+    return null;
+  }
 
-    document.getElementById('goBtn').onclick = () => {
-      const start = document.getElementById('startPage').value.trim();
-      const depth = +depthSlider.value;
-      if (!start) return;
-      sim?.stop();
-      sim = null;
-      g.selectAll('*').remove();
-      crawl(start, depth);
-    };
+  function handleMouseOver(e, d) {
+    tooltip.style('display','block').text(d.id);
+    const path = shortestPath(d.id);
+    if (!path) return;
+    const edgeSet = new Set(path.slice(1).map((tgt,i) => path[i] + '→' + tgt));
+    linkSel
+      .attr('stroke', lk => edgeSet.has(lk.source.id + '→' + lk.target.id) ? 'red' : '#999')
+      .attr('stroke-opacity', lk => edgeSet.has(lk.source.id + '→' + lk.target.id) ? 1 : 0.1);
+    nodeSel
+      .attr('r', nd => path.includes(nd.id) ? 6 : 4);
+  }
+
+  function handleMouseOut() {
+    tooltip.style('display','none');
+    linkSel.attr('stroke','#999').attr('stroke-opacity',0.1);
+    nodeSel.attr('r',4);
+  }
+
+  function dragstarted(e,d) {
+    if (!e.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x; d.fy = d.y;
+  }
+  function dragged(e,d) {
+    d.fx = e.x; d.fy = e.y;
+  }
+  function dragended(e,d) {
+    if (!e.active) simulation.alphaTarget(0);
+    d.fx = d.fy = null;
+  }
+
+  // --- Crawl & Render ---
+  async function startCrawl() {
+    // reset
+    graph = { nodes: [], links: [] };
+    nodeById.clear(); adjacency.clear();
+    container.selectAll('*').remove();
+    simulation?.stop();
+    initSimulation();
+
+    startNodeId = startInput.value.trim();
+    const maxDepth = +depthSlider.value;
+    const mode = [...modeInputs].find(r=>r.checked).value;
+
+    addNode(startNodeId, 0);
+    let queue = [{ id: startNodeId, depth: 0 }];
+    const visited = new Set([startNodeId]);
+
+    while (queue.length) {
+      const { id, depth } = queue.shift();
+      statusEl.textContent = `Fetching "${id}" (depth ${depth}) – queue ${queue.length}`;
+      const neighbors = await fetchLinks(id);
+
+      for (const nb of neighbors) {
+        addNode(nb, depth+1);
+        addLink(id, nb);
+        if (depth+1 <= maxDepth && !visited.has(nb)) {
+          visited.add(nb);
+          queue.push({ id: nb, depth: depth+1 });
+        }
+      }
+
+      if (mode === 'incremental') updateSimulation();
+    }
+
+    // final render if “after” mode
+    if (mode === 'after') updateSimulation();
+
+    statusEl.textContent = `Done: ${graph.nodes.length} nodes, ${graph.links.length} links.`;
+  }
+
+  goBtn.onclick = startCrawl;
+
+  toggleBtn.onclick = () => {
+    simPaused = !simPaused;
+    toggleBtn.textContent = simPaused ? 'Resume Layout' : 'Pause Layout';
+    if (!simPaused) simulation.alpha(0.3).restart();
+  };
+
+  // --- Download CSVs for Gephi ---
+  function downloadCSV(content, filename) {
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  downloadBtn.onclick = () => {
+    // nodes: Id,Label,Depth
+    const nodeCsv = ['Id,Label,Depth']
+      .concat(graph.nodes.map(n => 
+        `"${n.id.replace(/"/g,'""')}","${n.id.replace(/"/g,'""')}",${n.depth}`
+      )).join('\n');
+    downloadCSV(nodeCsv, 'nodes.csv');
+
+    // edges: Source,Target
+    const edgeCsv = ['Source,Target']
+      .concat(graph.links.map(l =>
+        `"${l.source.id}","${l.target.id}"`
+      )).join('\n');
+    downloadCSV(edgeCsv, 'edges.csv');
+  };
   </script>
 </body>
 </html>
