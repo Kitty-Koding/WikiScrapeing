@@ -2,209 +2,218 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Wikipedia Link Graph Explorer</title>
+  <title>Wikipedia Graph Explorer</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 1em; }
+    body { font-family: sans-serif; margin: 0; padding: 1em; }
     input, button { padding: 0.5em; margin: 0.5em 0; }
-    label { display: block; margin-top: 1em; }
-    #status { margin: .5em 0; color: #555; white-space: pre; }
-    svg { width: 100%; height: 80vh; border: 1px solid #ccc; }
+    #status { margin: 0.5em 0; }
+    svg { width: 100%; height: 80vh; border: 1px solid #ccc; display: block; }
     #tooltip {
-      position: absolute; pointer-events: none;
-      background: rgba(255,255,255,0.9);
-      padding: 4px 8px; border: 1px solid #999;
-      border-radius: 4px; font-size: 12px; display: none;
+      position: absolute; background: #fff; padding: 4px 8px; border: 1px solid #333;
+      border-radius: 4px; pointer-events: none; display: none; font-size: 12px;
     }
+    #fps { position: fixed; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); color: #0f0;
+      font-family: monospace; padding: 4px 8px; border-radius: 4px; font-size: 14px; }
   </style>
 </head>
 <body>
-  <h1>Wikipedia Link Graph Explorer</h1>
-
-  <label>
-    Starting page:
-    <input type="text" id="startPage" placeholder="e.g. JavaScript">
-  </label>
-  <label>
-    Depth (1–8):
-    <input type="range" id="depthSlider" min="1" max="8" value="2">
-    <span id="depthValue">2</span>
-  </label>
-  <button id="goBtn">Generate Graph</button>
-  <div id="status">Idle.</div>
-
-  <div id="tooltip"></div>
+  <h2>Wikipedia Graph Explorer</h2>
+  <label>Start page: <input id="startPage" value="JavaScript"></label>
+  <label>Depth: <input type="range" min="1" max="8" id="depthSlider" value="2"> <span id="depthLabel">2</span></label>
+  <button id="goBtn">Start</button>
+  <div id="status">Idle...</div>
   <svg id="graph"></svg>
+  <div id="tooltip"></div>
+  <div id="fps">FPS: 0</div>
 
-  <!-- D3 -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    const depthSlider = document.getElementById('depthSlider');
-    const depthValue  = document.getElementById('depthValue');
-    const statusEl    = document.getElementById('status');
-    const goBtn       = document.getElementById('goBtn');
-    const tooltipEl   = d3.select('#tooltip');
-    const svg         = d3.select('#graph');
-    const container   = svg.append('g');
+  const tooltip = d3.select('#tooltip');
+  const status = document.getElementById('status');
+  const depthSlider = document.getElementById('depthSlider');
+  const depthLabel = document.getElementById('depthLabel');
+  const fpsDisplay = document.getElementById('fps');
+  let graphData = { nodes: [], links: [] }, graphMap = new Map();
+  let startNode = null;
 
-    depthSlider.addEventListener('input', () => {
-      depthValue.textContent = depthSlider.value;
-    });
-
-    // Zoom & pan
-    const ZOOM_LABEL_THRESHOLD = 1.5;
-    svg.call(d3.zoom()
-      .scaleExtent([0.1, 4])
-      .on('zoom', ({transform}) => {
-        container.attr('transform', transform);
-        container.selectAll('text')
-          .style('display', transform.k >= ZOOM_LABEL_THRESHOLD ? 'block' : 'none');
-      }));
-
-    let simulation, allNodes = [], allLinks = [];
-
-    async function fetchLinks(title) {
-      const enc = encodeURIComponent(title), all = [];
-      let cont = '';
-      do {
-        const url = `https://en.wikipedia.org/w/api.php` +
-                    `?action=query&prop=links&titles=${enc}` +
-                    `&pllimit=max&format=json&origin=*${cont}`;
-        const j = await (await fetch(url)).json();
-        const p = Object.values(j.query.pages)[0];
-        if (p.links) {
-          p.links.forEach(l => {
-            if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title))
-              all.push(l.title);
-          });
-        }
-        cont = j.continue ? `&plcontinue=${j.continue.plcontinue}` : '';
-      } while (cont);
-      return Array.from(new Set(all));
+  // FPS Counter
+  let lastFrame = performance.now(), frameCount = 0;
+  function updateFPS() {
+    const now = performance.now();
+    frameCount++;
+    if (now - lastFrame >= 1000) {
+      fpsDisplay.textContent = `FPS: ${frameCount}`;
+      frameCount = 0;
+      lastFrame = now;
     }
+    requestAnimationFrame(updateFPS);
+  }
+  updateFPS();
 
-    function initializeGraph() {
-      container.selectAll('*').remove();
-      allNodes = [];
-      allLinks = [];
+  depthSlider.oninput = () => depthLabel.textContent = depthSlider.value;
 
-      simulation = d3.forceSimulation()
-        .force('link', d3.forceLink().id(d => d.id).distance(60).strength(0.1))
-        .force('charge', d3.forceManyBody().strength(-40))
-        .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2))
-        .alphaDecay(0.03);
-
-      const linkGroup = container.append('g')
-        .attr('stroke', '#aaa')
-        .attr('stroke-opacity', 0.2)
-        .selectAll('line');
-
-      const nodeGroup = container.append('g')
-        .selectAll('circle');
-
-      const labelGroup = container.append('g')
-        .selectAll('text');
-
-      simulation.on('tick', () => {
-        container.selectAll('line')
-          .attr('x1', d => d.source.x)
-          .attr('y1', d => d.source.y)
-          .attr('x2', d => d.target.x)
-          .attr('y2', d => d.target.y);
-
-        container.selectAll('circle')
-          .attr('cx', d => d.x)
-          .attr('cy', d => d.y);
-
-        container.selectAll('text')
-          .attr('x', d => d.x + 8)
-          .attr('y', d => d.y + 4);
-      });
-    }
-
-    function addToGraph(newNodes, newLinks) {
-      const existingNodeIds = new Set(allNodes.map(n => n.id));
-      const filteredNodes = newNodes.filter(n => !existingNodeIds.has(n.id));
-      allNodes.push(...filteredNodes);
-      allLinks.push(...newLinks);
-
-      simulation.nodes(allNodes);
-      simulation.force('link').links(allLinks);
-      simulation.alpha(0.5).restart();
-
-      const color = d3.scaleOrdinal(d3.schemeCategory10);
-
-      const node = container.selectAll('circle')
-        .data(allNodes, d => d.id)
-        .join('circle')
-          .attr('r', 6)
-          .attr('fill', d => color(d.depth))
-          .attr('cx', svg.node().clientWidth / 2 + Math.random() * 20 - 10)
-          .attr('cy', svg.node().clientHeight / 2 + Math.random() * 20 - 10)
-          .on('mouseover', (e, d) => {
-            tooltipEl.style('display','block').text(d.id);
-          })
-          .on('mousemove', (e) => {
-            tooltipEl.style('top',  (e.pageY + 10)+'px')
-                     .style('left', (e.pageX + 10)+'px');
-          })
-          .on('mouseout', () => {
-            tooltipEl.style('display','none');
-          })
-          .call(d3.drag()
-            .on('start', (e,d) => {
-              if (!e.active) simulation.alphaTarget(0.3).restart();
-              d.fx = d.x; d.fy = d.y;
-            })
-            .on('drag', (e,d) => { d.fx = e.x; d.fy = e.y; })
-            .on('end', (e,d) => {
-              if (!e.active) simulation.alphaTarget(0);
-              d.fx = null; d.fy = null;
-            }));
-
-      container.selectAll('text')
-        .data(allNodes, d => d.id)
-        .join('text')
-          .text(d => d.id)
-          .attr('font-size','9px')
-          .style('display', 'none');
-    }
-
-    async function crawlAndBuild(start, maxDepth) {
-      initializeGraph();
-      const queue = [{title: start, depth: 0}];
-      const seen = new Set([start]);
-
-      while (queue.length) {
-        const current = queue.shift();
-        statusEl.textContent = `Fetching "${current.title}" (depth ${current.depth}) - Queue: ${queue.length}`;
-
-        const links = await fetchLinks(current.title);
-        const newNodes = [], newLinks = [];
-
-        for (const l of links) {
-          newLinks.push({source: current.title, target: l});
-          if (!seen.has(l) && current.depth + 1 <= maxDepth) {
-            queue.push({title: l, depth: current.depth + 1});
-            seen.add(l);
-            newNodes.push({id: l, depth: current.depth + 1});
+  async function fetchLinks(title) {
+    const enc = encodeURIComponent(title), all = new Set();
+    let cont = '';
+    do {
+      const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${enc}&pllimit=max&format=json&origin=*${cont}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      const page = Object.values(json.query.pages)[0];
+      if (page.links) {
+        for (const l of page.links) {
+          if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title)) {
+            all.add(l.title);
           }
         }
+      }
+      cont = json.continue ? `&plcontinue=${json.continue.plcontinue}` : '';
+    } while (cont);
+    return Array.from(all);
+  }
 
-        addToGraph(
-          [{id: current.title, depth: current.depth}, ...newNodes],
-          newLinks
-        );
+  async function crawl(start, maxDepth) {
+    graphData = { nodes: [], links: [] };
+    graphMap.clear();
+    const queue = [{ title: start, depth: 0 }];
+    const visited = new Set();
+    visited.add(start);
+    startNode = start;
+
+    while (queue.length) {
+      const current = queue.shift();
+      const { title, depth } = current;
+      status.textContent = `Fetching ${title} (depth ${depth}) - Queue: ${queue.length}`;
+      const links = await fetchLinks(title);
+
+      if (!graphMap.has(title)) {
+        graphMap.set(title, { id: title, depth });
+        graphData.nodes.push(graphMap.get(title));
       }
 
-      statusEl.textContent = `Done. Nodes: ${allNodes.length}, Links: ${allLinks.length}`;
+      for (const l of links) {
+        if (!graphMap.has(l)) {
+          graphMap.set(l, { id: l, depth: depth + 1 });
+          graphData.nodes.push(graphMap.get(l));
+        }
+        graphData.links.push({ source: title, target: l });
+        if (!visited.has(l) && depth + 1 <= maxDepth) {
+          visited.add(l);
+          queue.push({ title: l, depth: depth + 1 });
+        }
+      }
+      drawGraph(); // real-time drawing
+    }
+    computeClusters();
+  }
+
+  function computeClusters() {
+    // Fast greedy cluster approximation
+    const clusters = new Map();
+    let cid = 0;
+    for (const node of graphData.nodes) {
+      if (!clusters.has(node.id)) {
+        const clusterNodes = bfs(node.id);
+        for (const n of clusterNodes) clusters.set(n, cid);
+        cid++;
+      }
+    }
+    for (const node of graphData.nodes) {
+      node.cluster = clusters.get(node.id);
+    }
+    drawGraph(true);
+  }
+
+  function bfs(start) {
+    const queue = [start], visited = new Set([start]);
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const l of graphData.links) {
+        if (l.source === cur && !visited.has(l.target)) {
+          visited.add(l.target);
+          queue.push(l.target);
+        }
+        if (l.target === cur && !visited.has(l.source)) {
+          visited.add(l.source);
+          queue.push(l.source);
+        }
+      }
+    }
+    return visited;
+  }
+
+  function shortestPath(targetId) {
+    const queue = [[targetId]], visited = new Set([targetId]);
+    while (queue.length) {
+      const path = queue.shift();
+      const node = path[0];
+      if (node === startNode) return path;
+      for (const l of graphData.links) {
+        if (l.target === node && !visited.has(l.source)) {
+          visited.add(l.source);
+          queue.push([l.source, ...path]);
+        }
+      }
+    }
+    return null;
+  }
+
+  const svg = d3.select('#graph');
+  const g = svg.append('g');
+  svg.call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
+
+  let sim = null;
+  function drawGraph(update = false) {
+    const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+    if (!sim || update) {
+      sim?.stop();
+      sim = d3.forceSimulation(graphData.nodes)
+        .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(50))
+        .force('charge', d3.forceManyBody().strength(-40))
+        .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2));
     }
 
-    goBtn.addEventListener('click', () => {
-      const start = document.getElementById('startPage').value.trim();
-      const depth = +depthSlider.value;
-      if (!start) return alert('Enter a start page.');
-      crawlAndBuild(start, depth);
+    const link = g.selectAll('line')
+      .data(graphData.links)
+      .join('line')
+      .attr('stroke', '#999')
+      .attr('stroke-opacity', 0.1);
+
+    const node = g.selectAll('circle')
+      .data(graphData.nodes)
+      .join('circle')
+      .attr('r', 5)
+      .attr('fill', d => color(d.cluster ?? 0))
+      .on('mouseover', (e, d) => {
+        tooltip.style('display', 'block').text(d.id);
+        const path = shortestPath(d.id);
+        if (path) {
+          link.attr('stroke', l => path.includes(l.source.id) && path.includes(l.target.id) ? 'red' : '#999')
+              .attr('stroke-opacity', l => path.includes(l.source.id) && path.includes(l.target.id) ? 1 : 0.1);
+        }
+      })
+      .on('mousemove', e => {
+        tooltip.style('top', (e.pageY + 10)+'px').style('left', (e.pageX + 10)+'px');
+      })
+      .on('mouseout', () => {
+        tooltip.style('display', 'none');
+        link.attr('stroke', '#999').attr('stroke-opacity', 0.1);
+      });
+
+    sim.on('tick', () => {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      node.attr('cx', d => d.x).attr('cy', d => d.y);
     });
+  }
+
+  document.getElementById('goBtn').onclick = () => {
+    const start = document.getElementById('startPage').value.trim();
+    const depth = +depthSlider.value;
+    if (!start) return;
+    crawl(start, depth);
+  };
   </script>
 </body>
 </html>
