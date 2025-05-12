@@ -9,6 +9,7 @@
       --accent: #18bc9c;
       --bg: #ecf0f1;
       --text: #34495e;
+      --segment-bg: #ddd;
     }
     * { box-sizing: border-box; }
     body {
@@ -41,24 +42,23 @@
       cursor: pointer; font-size: 1em;
     }
     .controls button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #progress-wrap {
+    #progressBar {
       margin: 1em 0; width: 100%; max-width: 480px;
+      display: flex; height: 1.2em; border-radius: 4px;
+      overflow: hidden; background: var(--segment-bg);
     }
-    progress {
-      width: 100%; height: 1.2em;
-      appearance: none;
+    .segment {
+      position: relative;
+      height: 100%;
+      background: var(--segment-bg);
     }
-    progress::-webkit-progress-bar {
-      background: #ddd; border-radius: 4px;
-    }
-    progress::-webkit-progress-value {
+    .segment .fill {
+      position: absolute; top:0; left:0; bottom:0;
       background: var(--accent);
-      border-radius: 4px;
+      width: 0%;
     }
-    #status, #eta, #filesizes {
-      margin: 0.5em 0;
-      font-size: 0.9em;
-      text-align: center;
+    #status, #eta, #depthStatus, #filesizes {
+      margin: 0.3em 0; font-size: 0.9em; text-align: center;
     }
     #filesizes span { display: block; }
   </style>
@@ -76,9 +76,8 @@
     </div>
   </div>
 
-  <div id="progress-wrap">
-    <progress id="progress" value="0" max="1"></progress>
-  </div>
+  <div id="progressBar"></div>
+  <div id="depthStatus">Depth: 0</div>
   <div id="status">Idle.</div>
   <div id="eta"></div>
   <div id="filesizes"></div>
@@ -90,139 +89,169 @@
     const startInput  = document.getElementById('startPage');
     const depthSlider = document.getElementById('depth');
     const depthVal    = document.getElementById('depthVal');
-    const progressBar = document.getElementById('progress');
+    const progressBar = document.getElementById('progressBar');
     const statusEl    = document.getElementById('status');
     const etaEl       = document.getElementById('eta');
+    const depthEl     = document.getElementById('depthStatus');
     const sizesEl     = document.getElementById('filesizes');
 
     depthSlider.oninput = () => depthVal.textContent = depthSlider.value;
 
-    // concurrency controlled BFS
+    function formatTime(ms) {
+      const s = Math.round(ms/1000);
+      const m = Math.floor(s/60), r = s % 60;
+      return `${m}m ${r}s`;
+    }
+
     async function crawl(start, maxDepth) {
-      const queue = [{id: start, depth:0}];
+      // state
+      const queue = [{id:start, depth:0}];
       const visited = new Set([start]);
       const nodes = [], links = [];
-      let totalToProcess = 1, done = 0;
-      let startTime = performance.now(), avgFetch = 0;
+      let total = 1, done = 0;
+      let avgTime = 0, startTime = performance.now();
+
+      // per-depth counts
+      const depthCounts = {}, doneCounts = {};
+
+      function updateSegments() {
+        progressBar.innerHTML = '';
+        for (let d = 0; d <= maxDepth; d++) {
+          const cnt = depthCounts[d] || 0;
+          if (!cnt) continue;
+          const seg = document.createElement('div');
+          seg.className = 'segment';
+          const widthPct = cnt/total * 100;
+          seg.style.flex = cnt;
+          // fill
+          const fill = document.createElement('div');
+          fill.className = 'fill';
+          const donePct = doneCounts[d] ? doneCounts[d]/cnt*100 : 0;
+          fill.style.width = donePct + '%';
+          seg.appendChild(fill);
+          seg.title = `Depth ${d}: ${doneCounts[d]||0}/${cnt}`;
+          progressBar.appendChild(seg);
+        }
+      }
+
+      function updateStatus() {
+        statusEl.textContent = `Processed ${done}/${total}`;
+        const rem = total - done;
+        const timeLeft = avgTime*rem;
+        etaEl.textContent = rem>0 ? `Time left: ${formatTime(timeLeft)}` : '';
+        updateSegments();
+      }
 
       statusEl.textContent = 'Initializing…';
-      updateProgress();
+      updateSegments();
 
       const concurrency = 5;
       let active = 0;
 
       return new Promise(resolve => {
         function next() {
+          if (!queue.length && active===0) {
+            return resolve({nodes,links});
+          }
           while (active < concurrency && queue.length) {
-            const {id, depth} = queue.shift();
+            const {id,depth} = queue.shift();
             active++;
-            fetchLinks(id).then(neigh => {
-              const t0 = performance.now();
+            // record depthCounts
+            depthCounts[depth] = (depthCounts[depth]||0) + 1;
+
+            const t0 = performance.now();
+            fetchLinks(id).then(neigh=>{
+              const t1 = performance.now();
+              avgTime = ((avgTime*done)+(t1-t0)) / (done+1);
+
               // record node
-              nodes.push({ id, depth });
-              neigh.forEach(nb => {
-                links.push({ source: id, target: nb });
+              nodes.push({id,depth});
+              // prepare doneCounts
+              doneCounts[depth] = (doneCounts[depth]||0) + 1;
+
+              neigh.forEach(nb=>{
+                links.push({source:id,target:nb});
                 if (!visited.has(nb) && depth+1<=maxDepth) {
                   visited.add(nb);
-                  queue.push({id: nb, depth: depth+1});
-                  totalToProcess++;
+                  queue.push({id:nb,depth:depth+1});
+                  total++;
                 }
               });
-              // update stats
+            }).catch(()=>{
+              // even on error count as done
+              doneCounts[depth] = (doneCounts[depth]||0) + 1;
+            }).finally(()=>{
               done++; active--;
-              const t1 = performance.now();
-              avgFetch = ((avgFetch*(done-1)) + (t1-t0)) / done;
-              updateProgress();
-              if (queue.length || active) next();
-              else resolve({nodes, links});
-            }).catch(err=>{
-              console.error(err);
-              done++; active--;
-              updateProgress();
-              if (queue.length || active) next();
-              else resolve({nodes, links});
+              depthEl.textContent = `Depth: ${Math.min(queue[0]?.depth||maxDepth, maxDepth)}`;
+              updateStatus();
+              next();
             });
           }
         }
         next();
       });
-
-      function updateProgress() {
-        statusEl.textContent = `Processed ${done}/${totalToProcess}`;
-        progressBar.max = totalToProcess;
-        progressBar.value = done;
-        const rem = totalToProcess - done;
-        const eta = rem * avgFetch;
-        const sec = Math.round(eta/1000);
-        etaEl.textContent = avgFetch
-          ? `ETA: ${Math.floor(sec/60)}m ${sec%60}s`
-          : '';
-      }
     }
 
     async function fetchLinks(title) {
-      const enc = encodeURIComponent(title);
-      let cont='', out=new Set();
+      const enc = encodeURIComponent(title), out=new Set();
+      let cont='';
       do {
-        const url = `https://en.wikipedia.org/w/api.php`+
-          `?action=query&prop=links&titles=${enc}`+
-          `&pllimit=max&format=json&origin=*${cont}`;
-        const res = await fetch(url);
+        const res = await fetch(
+          `https://en.wikipedia.org/w/api.php` +
+          `?action=query&prop=links&titles=${enc}` +
+          `&pllimit=max&format=json&origin=*${cont}`
+        );
         const j = await res.json();
-        const page = Object.values(j.query.pages)[0];
-        if (page.links) {
-          page.links.forEach(l=>{
-            if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title))
-              out.add(l.title);
-          });
-        }
+        const p = Object.values(j.query.pages)[0];
+        if (p.links) p.links.forEach(l=>{
+          if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title))
+            out.add(l.title);
+        });
         cont = j.continue ? `&plcontinue=${j.continue.plcontinue}` : '';
       } while(cont);
       return Array.from(out);
     }
 
-    // build CSV & trigger download, measure size via Blob
-    function prepareAndEnableDownload(nodes, links) {
-      // nodes.csv
+    function prepareDownload(nodes, links) {
+      // build CSV blobs
       const nodeCsv = ['Id,Label,Depth']
         .concat(nodes.map(n=>`"${n.id}","${n.id}",${n.depth}`))
         .join('\n');
-      const nodeBlob = new Blob([nodeCsv], {type:'text/csv'});
-      // edges.csv
       const edgeCsv = ['Source,Target']
         .concat(links.map(l=>`"${l.source}","${l.target}"`))
         .join('\n');
+
+      const nodeBlob = new Blob([nodeCsv], {type:'text/csv'});
       const edgeBlob = new Blob([edgeCsv], {type:'text/csv'});
 
-      // show sizes
       sizesEl.innerHTML = `
         <span>nodes.csv: ${(nodeBlob.size/1024).toFixed(1)} KB</span>
-        <span>edges.csv: ${(edgeBlob.size/1024).toFixed(1)} KB</span>`;
+        <span>edges.csv: ${(edgeBlob.size/1024).toFixed(1)} KB</span>
+      `;
 
-      // hook download
       downloadBtn.onclick = ()=>{
-        triggerDownload(nodeBlob,'nodes.csv');
-        triggerDownload(edgeBlob,'edges.csv');
+        downloadBlob(nodeBlob,'nodes.csv');
+        downloadBlob(edgeBlob,'edges.csv');
       };
       downloadBtn.disabled = false;
     }
 
-    function triggerDownload(blob, name) {
+    function downloadBlob(blob, name) {
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = name;
-      a.click();
+      const a   = document.createElement('a');
+      a.href = url; a.download = name; a.click();
       URL.revokeObjectURL(url);
     }
 
-    // main
-    startBtn.onclick = async ()=> {
+    startBtn.onclick = async ()=>{
       startBtn.disabled = downloadBtn.disabled = true;
-      sizesEl.textContent = etaEl.textContent = '';
       statusEl.textContent = 'Starting crawl…';
-      const { nodes, links } = await crawl(startInput.value.trim(), +depthSlider.value);
+      etaEl.textContent = '';
+      sizesEl.textContent = '';
+      progressBar.innerHTML = '';
+      const {nodes,links} = await crawl(startInput.value.trim(), +depthSlider.value);
       statusEl.textContent = `Done: ${nodes.length} nodes, ${links.length} links.`;
-      prepareAndEnableDownload(nodes, links);
+      prepareDownload(nodes, links);
       startBtn.disabled = false;
     };
   })();
