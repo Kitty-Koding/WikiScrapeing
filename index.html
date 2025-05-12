@@ -25,8 +25,8 @@
     <input type="text" id="startPage" placeholder="e.g. JavaScript">
   </label>
   <label>
-    Depth (2–6):
-    <input type="range" id="depthSlider" min="2" max="6" value="2">
+    Depth (1–8):
+    <input type="range" id="depthSlider" min="1" max="8" value="2">
     <span id="depthValue">2</span>
   </label>
   <button id="goBtn">Generate Graph</button>
@@ -50,16 +50,17 @@
       depthValue.textContent = depthSlider.value;
     });
 
-    // Zoom & pan + label toggle
+    // Zoom & pan
     const ZOOM_LABEL_THRESHOLD = 1.5;
     svg.call(d3.zoom()
       .scaleExtent([0.1, 4])
-      .on('zoom', ({transform, sourceEvent}) => {
+      .on('zoom', ({transform}) => {
         container.attr('transform', transform);
-        // toggle labels based on zoom scale
         container.selectAll('text')
           .style('display', transform.k >= ZOOM_LABEL_THRESHOLD ? 'block' : 'none');
       }));
+
+    let simulation, allNodes = [], allLinks = [];
 
     async function fetchLinks(title) {
       const enc = encodeURIComponent(title), all = [];
@@ -81,132 +82,128 @@
       return Array.from(new Set(all));
     }
 
-    // BFS by depth to compute per-level counts
-    async function crawl(start, maxDepth) {
-      statusEl.textContent = 'Crawling…';
-      const nodesMap = new Map(), links = [];
-      const levels = [[start]];
-      nodesMap.set(start, {id: start, depth: 0});
+    function initializeGraph() {
+      container.selectAll('*').remove();
+      allNodes = [];
+      allLinks = [];
 
-      for (let depth = 0; depth <= maxDepth; depth++) {
-        const current = levels[depth] || [];
-        const total   = current.length;
-        if (!total) continue;
-        const next    = [];
+      simulation = d3.forceSimulation()
+        .force('link', d3.forceLink().id(d => d.id).distance(60).strength(0.1))
+        .force('charge', d3.forceManyBody().strength(-40))
+        .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2))
+        .alphaDecay(0.03);
 
-        for (let i = 0; i < total; i++) {
-          const title = current[i];
-          statusEl.textContent = 
-            `(depth ${depth}) – ` +
-            `${i+1}/${total} (${Math.round((i+1)/total*100)}%) -`+`Fetching "${title}"` ;
+      const linkGroup = container.append('g')
+        .attr('stroke', '#aaa')
+        .attr('stroke-opacity', 0.2)
+        .selectAll('line');
 
-          const neigh = await fetchLinks(title);
-          neigh.forEach(tgt => {
-            if (!nodesMap.has(tgt)) {
-              nodesMap.set(tgt, {id: tgt, depth: depth+1});
-              if (depth+1 <= maxDepth) next.push(tgt);
-            }
-            links.push({source: title, target: tgt});
-          });
-        }
-        levels[depth+1] = next;
-      }
+      const nodeGroup = container.append('g')
+        .selectAll('circle');
 
-      statusEl.textContent = 
-        `Done crawl:\n` +
-        `• Nodes: ${nodesMap.size}\n` +
-        `• Links: ${links.length}`;
-      return {nodes: Array.from(nodesMap.values()), links};
+      const labelGroup = container.append('g')
+        .selectAll('text');
+
+      simulation.on('tick', () => {
+        container.selectAll('line')
+          .attr('x1', d => d.source.x)
+          .attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x)
+          .attr('y2', d => d.target.y);
+
+        container.selectAll('circle')
+          .attr('cx', d => d.x)
+          .attr('cy', d => d.y);
+
+        container.selectAll('text')
+          .attr('x', d => d.x + 8)
+          .attr('y', d => d.y + 4);
+      });
     }
 
-    function draw({nodes, links}) {
-      statusEl.textContent = 'Rendering graph…';
-      container.selectAll('*').remove();
+    function addToGraph(newNodes, newLinks) {
+      const existingNodeIds = new Set(allNodes.map(n => n.id));
+      const filteredNodes = newNodes.filter(n => !existingNodeIds.has(n.id));
+      allNodes.push(...filteredNodes);
+      allLinks.push(...newLinks);
 
-      const width  = +svg.node().clientWidth;
-      const height = +svg.node().clientHeight;
-      const color  = d3.scaleOrdinal(d3.schemeCategory10);
+      simulation.nodes(allNodes);
+      simulation.force('link').links(allLinks);
+      simulation.alpha(0.5).restart();
 
-      const sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id(d=>d.id).distance(60).strength(0.1))
-        .force('charge', d3.forceManyBody().strength(-50))
-        .force('center', d3.forceCenter(width/2, height/2))
-        .alphaDecay(0.05);
+      const color = d3.scaleOrdinal(d3.schemeCategory10);
 
-      // links with low opacity
-      container.append('g')
-        .attr('stroke','#aaa')
-        .attr('stroke-opacity', 0.2)
-        .selectAll('line')
-        .data(links)
-        .join('line');
-
-      // nodes without stroke
-      const node = container.append('g')
-        .selectAll('circle')
-        .data(nodes)
+      const node = container.selectAll('circle')
+        .data(allNodes, d => d.id)
         .join('circle')
           .attr('r', 6)
           .attr('fill', d => color(d.depth))
-          .on('mouseover', (e,d) => {
-            tooltipEl
-              .style('display','block')
-              .text(d.id);
+          .attr('cx', svg.node().clientWidth / 2 + Math.random() * 20 - 10)
+          .attr('cy', svg.node().clientHeight / 2 + Math.random() * 20 - 10)
+          .on('mouseover', (e, d) => {
+            tooltipEl.style('display','block').text(d.id);
           })
           .on('mousemove', (e) => {
-            tooltipEl
-              .style('top',  (e.pageY+10)+'px')
-              .style('left', (e.pageX+10)+'px');
+            tooltipEl.style('top',  (e.pageY + 10)+'px')
+                     .style('left', (e.pageX + 10)+'px');
           })
           .on('mouseout', () => {
             tooltipEl.style('display','none');
           })
           .call(d3.drag()
             .on('start', (e,d) => {
-              if (!e.active) sim.alphaTarget(0.3).restart();
+              if (!e.active) simulation.alphaTarget(0.3).restart();
               d.fx = d.x; d.fy = d.y;
             })
-            .on('drag',  (e,d) => { d.fx = e.x; d.fy = e.y; })
-            .on('end',   (e,d) => {
-              if (!e.active) sim.alphaTarget(0);
+            .on('drag', (e,d) => { d.fx = e.x; d.fy = e.y; })
+            .on('end', (e,d) => {
+              if (!e.active) simulation.alphaTarget(0);
               d.fx = null; d.fy = null;
             }));
 
-      // hidden labels initially
-      container.append('g')
-        .selectAll('text')
-        .data(nodes)
+      container.selectAll('text')
+        .data(allNodes, d => d.id)
         .join('text')
           .text(d => d.id)
           .attr('font-size','9px')
-          .attr('dx',8).attr('dy',4)
-          .style('display','none');
-
-      sim.on('tick', () => {
-        container.selectAll('line')
-          .attr('x1', d=>d.source.x)
-          .attr('y1', d=>d.source.y)
-          .attr('x2', d=>d.target.x)
-          .attr('y2', d=>d.target.y);
-
-        node
-          .attr('cx', d=>d.x)
-          .attr('cy', d=>d.y);
-
-        container.selectAll('text')
-          .attr('x', d=>d.x)
-          .attr('y', d=>d.y);
-      });
-
-      statusEl.textContent = 'Graph ready. Zoom in ≥'+ZOOM_LABEL_THRESHOLD+'× to see labels.';
+          .style('display', 'none');
     }
 
-    goBtn.addEventListener('click', async () => {
+    async function crawlAndBuild(start, maxDepth) {
+      initializeGraph();
+      const queue = [{title: start, depth: 0}];
+      const seen = new Set([start]);
+
+      while (queue.length) {
+        const current = queue.shift();
+        statusEl.textContent = `Fetching "${current.title}" (depth ${current.depth}) - Queue: ${queue.length}`;
+
+        const links = await fetchLinks(current.title);
+        const newNodes = [], newLinks = [];
+
+        for (const l of links) {
+          newLinks.push({source: current.title, target: l});
+          if (!seen.has(l) && current.depth + 1 <= maxDepth) {
+            queue.push({title: l, depth: current.depth + 1});
+            seen.add(l);
+            newNodes.push({id: l, depth: current.depth + 1});
+          }
+        }
+
+        addToGraph(
+          [{id: current.title, depth: current.depth}, ...newNodes],
+          newLinks
+        );
+      }
+
+      statusEl.textContent = `Done. Nodes: ${allNodes.length}, Links: ${allLinks.length}`;
+    }
+
+    goBtn.addEventListener('click', () => {
       const start = document.getElementById('startPage').value.trim();
       const depth = +depthSlider.value;
       if (!start) return alert('Enter a start page.');
-      const graph = await crawl(start, depth);
-      draw(graph);
+      crawlAndBuild(start, depth);
     });
   </script>
 </body>
