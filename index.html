@@ -21,6 +21,7 @@
   <label>Start page: <input id="startPage" value="JavaScript"></label>
   <label>Depth: <input type="range" min="1" max="8" id="depthSlider" value="2"> <span id="depthLabel">2</span></label>
   <button id="goBtn">Start</button>
+  <button id="toggleSim">Pause Layout</button>
   <div id="status">Idle...</div>
   <svg id="graph"></svg>
   <div id="tooltip"></div>
@@ -28,192 +29,173 @@
 
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-  const tooltip = d3.select('#tooltip');
-  const status = document.getElementById('status');
-  const depthSlider = document.getElementById('depthSlider');
-  const depthLabel = document.getElementById('depthLabel');
-  const fpsDisplay = document.getElementById('fps');
-  let graphData = { nodes: [], links: [] }, graphMap = new Map();
-  let startNode = null;
+    const tooltip = d3.select('#tooltip');
+    const status = document.getElementById('status');
+    const depthSlider = document.getElementById('depthSlider');
+    const depthLabel = document.getElementById('depthLabel');
+    const fpsDisplay = document.getElementById('fps');
+    const toggleBtn = document.getElementById('toggleSim');
 
-  // FPS Counter
-  let lastFrame = performance.now(), frameCount = 0;
-  function updateFPS() {
-    const now = performance.now();
-    frameCount++;
-    if (now - lastFrame >= 1000) {
-      fpsDisplay.textContent = `FPS: ${frameCount}`;
-      frameCount = 0;
-      lastFrame = now;
+    let graphData = { nodes: [], links: [] }, graphMap = new Map();
+    let startNode = null;
+    let simulationPaused = false;
+
+    // FPS Counter
+    let lastFrame = performance.now(), frameCount = 0;
+    function updateFPS() {
+      const now = performance.now();
+      frameCount++;
+      if (now - lastFrame >= 1000) {
+        fpsDisplay.textContent = `FPS: ${frameCount}`;
+        frameCount = 0;
+        lastFrame = now;
+      }
+      requestAnimationFrame(updateFPS);
     }
-    requestAnimationFrame(updateFPS);
-  }
-  updateFPS();
+    updateFPS();
 
-  depthSlider.oninput = () => depthLabel.textContent = depthSlider.value;
+    depthSlider.oninput = () => depthLabel.textContent = depthSlider.value;
 
-  async function fetchLinks(title) {
-    const enc = encodeURIComponent(title), all = new Set();
-    let cont = '';
-    do {
-      const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${enc}&pllimit=max&format=json&origin=*${cont}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      const page = Object.values(json.query.pages)[0];
-      if (page.links) {
-        for (const l of page.links) {
-          if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title)) {
-            all.add(l.title);
+    toggleBtn.onclick = () => {
+      simulationPaused = !simulationPaused;
+      toggleBtn.textContent = simulationPaused ? 'Resume Layout' : 'Pause Layout';
+      if (!simulationPaused) sim.alpha(0.3).restart();
+    };
+
+    async function fetchLinks(title) {
+      const enc = encodeURIComponent(title), all = new Set();
+      let cont = '';
+      do {
+        const url = `https://en.wikipedia.org/w/api.php?action=query&prop=links&titles=${enc}&pllimit=max&format=json&origin=*${cont}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        const page = Object.values(json.query.pages)[0];
+        if (page.links) {
+          for (const l of page.links) {
+            if (!/^(Category|Wikipedia|Help|File|Portal|Special|Template):/.test(l.title)) {
+              all.add(l.title);
+            }
+          }
+        }
+        cont = json.continue ? `&plcontinue=${json.continue.plcontinue}` : '';
+      } while (cont);
+      return Array.from(all);
+    }
+
+    async function crawl(start, maxDepth) {
+      graphData = { nodes: [], links: [] };
+      graphMap.clear();
+      const queue = [{ title: start, depth: 0 }];
+      const visited = new Set();
+      visited.add(start);
+      startNode = start;
+
+      while (queue.length) {
+        const current = queue.shift();
+        const { title, depth } = current;
+        status.textContent = `Fetching ${title} (depth ${depth}) - Remaining: ${queue.length}`;
+        const links = await fetchLinks(title);
+
+        if (!graphMap.has(title)) {
+          graphMap.set(title, { id: title, depth });
+          graphData.nodes.push(graphMap.get(title));
+        }
+
+        for (const l of links) {
+          if (!graphMap.has(l)) {
+            graphMap.set(l, { id: l, depth: depth + 1 });
+            graphData.nodes.push(graphMap.get(l));
+          }
+          graphData.links.push({ source: title, target: l });
+          if (!visited.has(l) && depth + 1 <= maxDepth) {
+            visited.add(l);
+            queue.push({ title: l, depth: depth + 1 });
+          }
+        }
+        drawGraph();
+      }
+    }
+
+    function shortestPath(targetId) {
+      const queue = [[targetId]], visited = new Set([targetId]);
+      while (queue.length) {
+        const path = queue.shift();
+        const node = path[0];
+        if (node === startNode) return path;
+        for (const l of graphData.links) {
+          if (l.target === node && !visited.has(l.source)) {
+            visited.add(l.source);
+            queue.push([l.source, ...path]);
           }
         }
       }
-      cont = json.continue ? `&plcontinue=${json.continue.plcontinue}` : '';
-    } while (cont);
-    return Array.from(all);
-  }
+      return null;
+    }
 
-  async function crawl(start, maxDepth) {
-    graphData = { nodes: [], links: [] };
-    graphMap.clear();
-    const queue = [{ title: start, depth: 0 }];
-    const visited = new Set();
-    visited.add(start);
-    startNode = start;
+    const svg = d3.select('#graph');
+    const g = svg.append('g');
+    svg.call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
 
-    while (queue.length) {
-      const current = queue.shift();
-      const { title, depth } = current;
-      status.textContent = `Fetching ${title} (depth ${depth}) - Queue: ${queue.length}`;
-      const links = await fetchLinks(title);
+    let sim = null;
+    function drawGraph() {
+      const color = d3.scaleOrdinal(d3.schemeTableau10);
 
-      if (!graphMap.has(title)) {
-        graphMap.set(title, { id: title, depth });
-        graphData.nodes.push(graphMap.get(title));
+      if (!sim) {
+        sim = d3.forceSimulation(graphData.nodes)
+          .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(40))
+          .force('charge', d3.forceManyBody().strength(-20))
+          .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2));
       }
 
-      for (const l of links) {
-        if (!graphMap.has(l)) {
-          graphMap.set(l, { id: l, depth: depth + 1 });
-          graphData.nodes.push(graphMap.get(l));
-        }
-        graphData.links.push({ source: title, target: l });
-        if (!visited.has(l) && depth + 1 <= maxDepth) {
-          visited.add(l);
-          queue.push({ title: l, depth: depth + 1 });
-        }
+      const link = g.selectAll('line')
+        .data(graphData.links)
+        .join('line')
+        .attr('stroke', '#999')
+        .attr('stroke-opacity', 0.1);
+
+      const node = g.selectAll('circle')
+        .data(graphData.nodes)
+        .join('circle')
+        .attr('r', 4)
+        .attr('fill', d => color(d.depth))
+        .on('mouseover', (e, d) => {
+          tooltip.style('display', 'block').text(d.id);
+          const path = shortestPath(d.id);
+          if (path) {
+            link.attr('stroke', l => path.includes(l.source.id) && path.includes(l.target.id) ? 'red' : '#999')
+                .attr('stroke-opacity', l => path.includes(l.source.id) && path.includes(l.target.id) ? 1 : 0.1);
+          }
+        })
+        .on('mousemove', e => {
+          tooltip.style('top', (e.pageY + 10)+'px').style('left', (e.pageX + 10)+'px');
+        })
+        .on('mouseout', () => {
+          tooltip.style('display', 'none');
+          link.attr('stroke', '#999').attr('stroke-opacity', 0.1);
+        });
+
+      if (!simulationPaused) {
+        sim.nodes(graphData.nodes);
+        sim.force('link').links(graphData.links);
+        sim.alpha(0.3).restart();
       }
-      drawGraph(); // real-time drawing
-    }
-    computeClusters();
-  }
 
-  function computeClusters() {
-    // Fast greedy cluster approximation
-    const clusters = new Map();
-    let cid = 0;
-    for (const node of graphData.nodes) {
-      if (!clusters.has(node.id)) {
-        const clusterNodes = bfs(node.id);
-        for (const n of clusterNodes) clusters.set(n, cid);
-        cid++;
-      }
-    }
-    for (const node of graphData.nodes) {
-      node.cluster = clusters.get(node.id);
-    }
-    drawGraph(true);
-  }
-
-  function bfs(start) {
-    const queue = [start], visited = new Set([start]);
-    while (queue.length) {
-      const cur = queue.shift();
-      for (const l of graphData.links) {
-        if (l.source === cur && !visited.has(l.target)) {
-          visited.add(l.target);
-          queue.push(l.target);
-        }
-        if (l.target === cur && !visited.has(l.source)) {
-          visited.add(l.source);
-          queue.push(l.source);
-        }
-      }
-    }
-    return visited;
-  }
-
-  function shortestPath(targetId) {
-    const queue = [[targetId]], visited = new Set([targetId]);
-    while (queue.length) {
-      const path = queue.shift();
-      const node = path[0];
-      if (node === startNode) return path;
-      for (const l of graphData.links) {
-        if (l.target === node && !visited.has(l.source)) {
-          visited.add(l.source);
-          queue.push([l.source, ...path]);
-        }
-      }
-    }
-    return null;
-  }
-
-  const svg = d3.select('#graph');
-  const g = svg.append('g');
-  svg.call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
-
-  let sim = null;
-  function drawGraph(update = false) {
-    const color = d3.scaleOrdinal(d3.schemeCategory10);
-
-    if (!sim || update) {
-      sim?.stop();
-      sim = d3.forceSimulation(graphData.nodes)
-        .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(50))
-        .force('charge', d3.forceManyBody().strength(-40))
-        .force('center', d3.forceCenter(svg.node().clientWidth / 2, svg.node().clientHeight / 2));
-    }
-
-    const link = g.selectAll('line')
-      .data(graphData.links)
-      .join('line')
-      .attr('stroke', '#999')
-      .attr('stroke-opacity', 0.1);
-
-    const node = g.selectAll('circle')
-      .data(graphData.nodes)
-      .join('circle')
-      .attr('r', 5)
-      .attr('fill', d => color(d.cluster ?? 0))
-      .on('mouseover', (e, d) => {
-        tooltip.style('display', 'block').text(d.id);
-        const path = shortestPath(d.id);
-        if (path) {
-          link.attr('stroke', l => path.includes(l.source.id) && path.includes(l.target.id) ? 'red' : '#999')
-              .attr('stroke-opacity', l => path.includes(l.source.id) && path.includes(l.target.id) ? 1 : 0.1);
-        }
-      })
-      .on('mousemove', e => {
-        tooltip.style('top', (e.pageY + 10)+'px').style('left', (e.pageX + 10)+'px');
-      })
-      .on('mouseout', () => {
-        tooltip.style('display', 'none');
-        link.attr('stroke', '#999').attr('stroke-opacity', 0.1);
+      sim.on('tick', () => {
+        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        node.attr('cx', d => d.x).attr('cy', d => d.y);
       });
+    }
 
-    sim.on('tick', () => {
-      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-      node.attr('cx', d => d.x).attr('cy', d => d.y);
-    });
-  }
-
-  document.getElementById('goBtn').onclick = () => {
-    const start = document.getElementById('startPage').value.trim();
-    const depth = +depthSlider.value;
-    if (!start) return;
-    crawl(start, depth);
-  };
+    document.getElementById('goBtn').onclick = () => {
+      const start = document.getElementById('startPage').value.trim();
+      const depth = +depthSlider.value;
+      if (!start) return;
+      sim?.stop();
+      sim = null;
+      g.selectAll('*').remove();
+      crawl(start, depth);
+    };
   </script>
 </body>
 </html>
